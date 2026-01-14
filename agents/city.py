@@ -5,6 +5,7 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
+import warnings
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
@@ -19,7 +20,6 @@ from aquacrop_abses import CropCell
 from aquacrop_abses.cell import get_crop_datetime
 from aquacrop_abses.farmer import Farmer
 from aquacrop_abses.load_datasets import crop_name_to_crop
-from loguru import logger
 from scipy.optimize import differential_evolution
 
 from ..core import economic_payoff, lost_reputation, update_city_csv
@@ -876,7 +876,7 @@ class City(Farmer):
         if total_irrigation is None:
             total_irrigation = self.seasonal_irrigation
         if total_irrigation == 0.0:
-            logger.warning(f"Zero irr volume for {self.unique_id}.")
+            warnings.warn(f"Zero irr volume for {self.unique_id}.")
             return 0.0, 0.0
         if surface_boundaries is None:
             surface_boundaries = (0.0, total_irrigation)

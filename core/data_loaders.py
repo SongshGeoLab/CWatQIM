@@ -32,7 +32,7 @@ except ImportError:
     from typing_extensions import TypeAlias
 
 if TYPE_CHECKING:
-    from abses.time import TimeDriver
+    from abses.core.time_driver import TimeDriver
 
     from ..agents.city import City, Province
 

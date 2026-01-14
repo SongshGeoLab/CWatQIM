@@ -1,0 +1,66 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cwatqim"
+dynamic = ["version"]
+description = "Crop-Water Quota Irrigation Model - ABM for Yellow River water allocation"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Shuang Song", email = "songshgeo@gmail.com"}
+]
+requires-python = ">=3.11,<3.12"
+keywords = [
+    "agent-based model",
+    "water resources",
+    "Yellow River",
+    "ABM",
+    "hydrology",
+    "irrigation",
+    "water quota",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Hydrology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+dependencies = [
+    "numpy>=1.24,<2.2",
+    "hydra-core>=1.3",
+    "pandas>=2.0",
+    "geopandas>=0.14",
+    "networkx>=3.0",
+    "abses>=0.9.4",
+    "aquacrop-abses>=0.5.1",
+    "xarray>=2023.1.0",
+    "rasterio>=1.3",
+    "rioxarray>=0.13",
+    "fiona>=1.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.2.1",
+    "ipykernel>=6.21.2",
+    "jupyterlab>4.0,<5.0",
+]
+
+[project.urls]
+Documentation = "https://github.com/SongshGeo/water_quota"
+Repository = "https://github.com/SongshGeo/water_quota"
+Issues = "https://github.com/SongshGeo/water_quota/issues"
+
+[tool.hatch.version]
+path = "__init__.py"
+
+[tool.hatch.build.targets.wheel]
+# Include only Python code and documentation
+# Configuration files are not included - users should clone from GitHub
+include = [
+    "**/*.py",
+    "docs/**/*.md",
+]

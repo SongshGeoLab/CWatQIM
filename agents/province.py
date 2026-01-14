@@ -13,7 +13,6 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 from abses import Actor, ActorsList, MainModel
-from loguru import logger
 
 from ..core import update_province_csv
 
@@ -331,10 +330,6 @@ class Province(Actor):
                 loading province quota data from CSV
         """
         self.quota = self.dynamic_var("quota") * 1e8
-        # === logging ===
-        logger.info(
-            f"{self.name_en} assigned water quota to {len(self.managed)} Cities."
-        )
 
     def update_graph(
         self,
@@ -393,6 +388,4 @@ class Province(Actor):
                 the network
         """
         links = self.managed.random.link("friend", p=l_p, mutual=mutual)
-        # 为了方便测试，记录一下链接的数量
-        logger.info(f"{self.name_en} has {len(links)} links.")
         return len(links)

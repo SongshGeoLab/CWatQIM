@@ -23,10 +23,16 @@ def run_abm(cfg: DictConfig | None = None) -> None:
     supports parallel execution of multiple simulation runs.
 
     The function will:
-        1. Load configuration from `config/config.yaml`
+        1. Load configuration from `config/config.yaml` (relative to repository root)
         2. Create an Experiment instance with the CWatQIModel
         3. Run multiple simulation repeats (can be parallelized)
         4. Save summary statistics to CSV
+
+    Note:
+        This model should be run from the repository root directory where the
+        `config/` folder is located. Configuration files are not included in
+        the PyPI package - users should clone the repository from GitHub to
+        access the full configuration.
 
     Args:
         cfg: Optional Hydra configuration dictionary. If None, Hydra will
