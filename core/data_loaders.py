@@ -86,6 +86,7 @@ def update_city_csv(
     data: pd.DataFrame,
     obj: City,
     time: TimeDriver,
+    **kwargs,
 ) -> pd.Series:
     """Extract city-specific data from CSV for the current simulation year.
 
