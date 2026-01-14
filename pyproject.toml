@@ -55,6 +55,7 @@ Documentation = "https://github.com/SongshGeoLab/CWatQIM#readme"
 Repository = "https://github.com/SongshGeoLab/CWatQIM"
 Issues = "https://github.com/SongshGeoLab/CWatQIM/issues"
 Changelog = "https://github.com/SongshGeoLab/CWatQIM/blob/main/CHANGELOG.md"
+"DOI" = "https://doi.org/10.5281/zenodo.4305038"
 
 [tool.hatch.version]
 path = "__init__.py"

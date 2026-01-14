@@ -1,7 +1,7 @@
 # CWatQIM: Crop-Water Quota Irrigation Model
 
 [![Release](https://img.shields.io/github/v/release/SongshGeoLab/CWatQIM)](https://github.com/SongshGeoLab/CWatQIM/releases)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4305038.svg)](https://doi.org/10.5281/zenodo.4305038)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CoMSES](https://img.shields.io/badge/CoMSES-Model-blue)](https://www.comses.net)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
@@ -41,7 +41,7 @@ pip install cwatqim
 
 This model is published on:
 
-- **Zenodo**: [DOI link will be added after first release]
+- **Zenodo**: [10.5281/zenodo.4305038](https://doi.org/10.5281/zenodo.4305038)
 - **CoMSES Net**: [Link will be added after submission]
 
 For citation and archival purposes, please use the Zenodo DOI.
@@ -130,11 +130,9 @@ If you use this model in your research, please cite:
   author = {Song, Shuang},
   year = {2026},
   url = {https://github.com/SongshGeoLab/CWatQIM},
-  doi = {10.5281/zenodo.XXXXXXX}
+  doi = {10.5281/zenodo.4305038}
 }
 ```
-
-> **Note**: Please replace `XXXXXXX` with the actual Zenodo DOI after the first release.
 
 ## License
 

@@ -20,3 +20,4 @@ keywords:
   - "hydrology"
   - "ABM simulation"
 abstract: "An agent-based model (ABM) for simulating water quota allocation and irrigation decisions in China's Yellow River Basin. The model investigates how water quota institutions shape irrigation water withdrawal decisions and their system-wide consequences, focusing on the mechanisms through which administrative water quotas influence water source composition (surface water versus groundwater), irrigation efficiency, and crop productivity."
+doi: "10.5281/zenodo.4305038"
