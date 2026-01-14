@@ -1,8 +1,10 @@
 # CWatQIM: Crop-Water Quota Irrigation Model
 
-[![DOI](https://zenodo.org/badge/DOI/xxx.svg)](https://doi.org/xxx)
+[![Release](https://img.shields.io/github/v/release/SongshGeoLab/CWatQIM)](https://github.com/SongshGeoLab/CWatQIM/releases)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CoMSES](https://img.shields.io/badge/CoMSES-Model-blue)](https://www.comses.net)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 
 An agent-based model (ABM) for simulating water quota allocation and irrigation decisions in China's Yellow River Basin.
 
@@ -24,9 +26,15 @@ CWatQIM (Crop-Water Quota Irrigation Model) is a multi-agent model that simulate
 Clone the repository to get the full model with configurations:
 
 ```bash
-git clone https://github.com/SongshGeo/water_quota.git
-cd water_quota
+git clone https://github.com/SongshGeoLab/CWatQIM.git
+cd CWatQIM
 pip install -e .
+```
+
+### From PyPI
+
+```bash
+pip install cwatqim
 ```
 
 ## Publication
@@ -104,7 +112,8 @@ You can override any configuration parameter via command line arguments or creat
 ## Documentation
 
 - [ODD+D Protocol](docs/ODD+D.md) - Complete model description following the ODD+D protocol
-- [API Reference](https://github.com/SongshGeo/water_quota) - Full API documentation
+- [CHANGELOG](CHANGELOG.md) - Version history and release notes
+- [API Reference](https://github.com/SongshGeoLab/CWatQIM) - Full API documentation
 
 ## Requirements
 
@@ -120,10 +129,12 @@ If you use this model in your research, please cite:
   title = {CWatQIM: Crop-Water Quota Irrigation Model},
   author = {Song, Shuang},
   year = {2026},
-  url = {https://github.com/SongshGeo/water_quota},
-  doi = {10.5281/zenodo.xxxxx}
+  url = {https://github.com/SongshGeoLab/CWatQIM},
+  doi = {10.5281/zenodo.XXXXXXX}
 }
 ```
+
+> **Note**: Please replace `XXXXXXX` with the actual Zenodo DOI after the first release.
 
 ## License
 

@@ -50,9 +50,11 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/SongshGeo/water_quota"
-Repository = "https://github.com/SongshGeo/water_quota"
-Issues = "https://github.com/SongshGeo/water_quota/issues"
+Homepage = "https://github.com/SongshGeoLab/CWatQIM"
+Documentation = "https://github.com/SongshGeoLab/CWatQIM#readme"
+Repository = "https://github.com/SongshGeoLab/CWatQIM"
+Issues = "https://github.com/SongshGeoLab/CWatQIM/issues"
+Changelog = "https://github.com/SongshGeoLab/CWatQIM/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "__init__.py"

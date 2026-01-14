@@ -1,0 +1,37 @@
+{
+  "title": "CWatQIM: Crop-Water Quota Irrigation Model",
+  "description": "An agent-based model (ABM) for simulating water quota allocation and irrigation decisions in China's Yellow River Basin. The model investigates how water quota institutions shape irrigation water withdrawal decisions and their system-wide consequences, focusing on the mechanisms through which administrative water quotas influence water source composition (surface water versus groundwater), irrigation efficiency, and crop productivity.",
+  "upload_type": "software",
+  "creators": [
+    {
+      "name": "Song, Shuang",
+      "affiliation": "Peking University",
+      "orcid": "0000-0002-xxxx-xxxx"
+    }
+  ],
+  "keywords": [
+    "agent-based model",
+    "water resources",
+    "Yellow River",
+    "irrigation",
+    "water quota",
+    "ABM",
+    "hydrology",
+    "multi-agent simulation"
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "communities": [
+    {
+      "identifier": "comses"
+    }
+  ],
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "10.xxxx/paper",
+      "resource_type": "publication-article"
+    }
+  ],
+  "notes": "This model is developed and maintained as part of the water_quota research project. For the complete research codebase including analysis scripts, please contact the authors."
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "python",
+  "packages": {
+    ".": {
+      "package-name": "cwatqim",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        "__init__.py",
+        "pyproject.toml"
+      ]
+    }
+  },
+  "changelog-sections": [
+    {"type": "feat", "section": "Features"},
+    {"type": "fix", "section": "Bug Fixes"},
+    {"type": "perf", "section": "Performance Improvements"},
+    {"type": "docs", "section": "Documentation"},
+    {"type": "refactor", "section": "Code Refactoring"},
+    {"type": "chore", "section": "Miscellaneous"}
+  ]
+}
