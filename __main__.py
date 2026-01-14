@@ -16,9 +16,44 @@ from cwatqim.model.main import CWatQIModel
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def run_abm(cfg: DictConfig | None = None) -> None:
-    """批量运行一次实验。
+    """Run batch experiments for the water quota model.
 
-    使用 `config/config.yaml` 配置文件。
+    This function serves as the main entry point for running batch simulations
+    of the CWatQIM model. It uses Hydra for configuration management and
+    supports parallel execution of multiple simulation runs.
+
+    The function will:
+        1. Load configuration from `config/config.yaml`
+        2. Create an Experiment instance with the CWatQIModel
+        3. Run multiple simulation repeats (can be parallelized)
+        4. Save summary statistics to CSV
+
+    Args:
+        cfg: Optional Hydra configuration dictionary. If None, Hydra will
+            automatically load from the default config file. The configuration
+            should include:
+            - `exp.repeats`: Number of simulation repeats (default: 1)
+            - `exp.num_process`: Number of parallel processes (default: 1)
+            - Model parameters and data paths
+
+    Example:
+        Run from command line:
+        ```bash
+        python -m cwatqim
+        ```
+
+        Or with custom config:
+        ```bash
+        python -m cwatqim exp.repeats=10 exp.num_process=4
+        ```
+
+    Note:
+        The function disables OmegaConf struct mode to allow the Experiment
+        class to pass additional parameters dynamically.
+
+    See Also:
+        - `cwatqim.model.main.CWatQIModel`: The main model class
+        - `abses.Experiment`: The experiment runner class
     """
     # Disable struct mode to allow Experiment to pass additional parameters
     OmegaConf.set_struct(cfg, False)

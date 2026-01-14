@@ -5,7 +5,11 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
-"""Model package."""
+"""Model package for the CWatQIM framework.
+
+This package contains the main model class that orchestrates the multi-agent
+simulation of water quota allocation in the Yellow River Basin.
+"""
 
 from .main import CWatQIModel
 

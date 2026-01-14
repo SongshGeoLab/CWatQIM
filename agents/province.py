@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from functools import cached_property
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -17,16 +17,64 @@ from loguru import logger
 
 from ..core import update_province_csv
 
-if TYPE_CHECKING:
-    from .city import City
-
 
 class Province(Actor):
-    """每个省的主体。
+    """Province-level agent managing water quota allocation to cities.
 
-    在黄河的水分配模型中，省起到的作用主要是向下一级分配水配额。
-    因为“八七”分水方案是省尺度进行配额的，但省一级单位通常不了解有多少用水需求。
-    因此，本模型假设省份控制总配额量，根据灌溉面积将其分配给各个地级市。
+    The Province agent represents a provincial-level water management authority
+    in the Yellow River Basin. It implements the "87 Water Allocation Scheme"
+    (八七分水方案), which allocates water quotas at the provincial scale.
+
+    Key responsibilities:
+        1. **Quota Management**: Receives annual water quota from the basin
+           authority and allocates it to subordinate cities
+        2. **Proportional Allocation**: Distributes quota based on irrigated
+           area, ensuring cities with larger irrigation needs receive
+           proportionally more quota
+        3. **Social Network Management**: Creates and maintains social network
+           links between cities within the province, enabling information
+           sharing and peer influence
+
+    The allocation mechanism assumes that provinces have limited information
+    about actual water demand at the city level, so they use irrigated area
+    as a proxy for water needs. This creates a realistic constraint where
+    allocation may not perfectly match demand.
+
+    Attributes:
+        name_en (str): English name of the province (e.g., "Henan", "Shandong").
+        _quota (float): Total water quota allocated to this province in m³.
+            Note: The public `quota` property returns this in 1e8 m³.
+        managed (ActorsList): List of City agents under this province's
+            jurisdiction, linked through the "Province" relationship.
+
+    Class Attributes:
+        _instances (dict): Class-level dictionary tracking province instances
+            per model to ensure singleton behavior (one province per name
+            per model instance).
+
+    Example:
+        Create and use a province:
+
+        ```python
+        # Create province (singleton pattern)
+        henan = Province.create(model, "Henan")
+
+        # Access quota and allocation
+        print(f"Total quota: {henan.quota} 1e8 m³")
+        print(f"Managed cities: {len(henan.managed)}")
+
+        # Update and allocate quota
+        henan.update_data()  # Loads quota from data and allocates to cities
+        ```
+
+    Note:
+        Provinces are created using a singleton pattern to ensure only one
+        instance exists per province name per model. This prevents duplicate
+        provinces and ensures consistent quota allocation.
+
+    See Also:
+        - `cwatqim.agents.city.City`: City agents that receive quota allocations
+        - `cwatqim.model.main.CWatQIModel`: Main model that manages provinces
     """
 
     _instances = {}
@@ -90,16 +138,47 @@ class Province(Actor):
 
     @classmethod
     def create(cls, model: MainModel, name_en: str, **kwargs) -> Province:
-        """使用单例模式创造一个省主体。
+        """Create or retrieve a province agent using singleton pattern.
 
-        Parameters:
-            model:
-                当前模型。
-            name_en:
-                省份的英文名。
+        This class method ensures that only one Province instance exists for
+        each province name within a model. If a province with the given name
+        already exists, it returns the existing instance. Otherwise, it
+        creates a new one.
+
+        The singleton pattern is important because:
+            - Quota allocation should be managed by a single authority
+            - Prevents duplicate provinces with conflicting allocations
+            - Ensures consistent province-level data (prices, efficiency)
+
+        Args:
+            model: The main model instance in which to create the province.
+            name_en: English name of the province. Must match a name in
+                `model.p.names` (province names from configuration).
+            **kwargs: Additional arguments passed to the Actor constructor.
 
         Returns:
-            一个省份的实例。
+            Province instance. If one already exists with this name in this
+            model, returns the existing instance. Otherwise, creates and
+            returns a new instance.
+
+        Raises:
+            ValueError: If the province name is not in `model.p.names`.
+
+        Example:
+            Create provinces for a model:
+
+            ```python
+            # First call creates the province
+            henan1 = Province.create(model, "Henan")
+
+            # Second call returns the same instance
+            henan2 = Province.create(model, "Henan")
+            assert henan1 is henan2  # True
+            ```
+
+        Note:
+            The singleton is tracked per model instance, so the same province
+            name can exist in different model runs without conflict.
         """
         # 对当前模型的每个省份，只有一个实例
         if model not in cls._instances:
@@ -148,18 +227,52 @@ class Province(Actor):
         )
 
     def assign(self, value: float, attr: str, by: Optional[str] = None) -> np.ndarray:
-        """将水资源额度分配给下辖的所有主体。
+        """Allocate a value to all managed cities proportionally.
 
-        Parameters:
-            quota:
-                需要分配的水资源额度。
-            flag:
-                分配的是最大水资源（flag = 'max'）还是最小水资源（flag = 'min'）
-            weighted_by:
-                权重的属性名。默认为空，为空则从配置文件中提取。
+        This method distributes a total value (e.g., water quota) among all
+        cities under this province's jurisdiction. The allocation is
+        proportional to a specified attribute (e.g., irrigated area).
+
+        The allocation formula:
+            allocation_i = value * (weight_i / sum(weights))
+
+        If weights sum to zero (all cities have zero weight), equal weights
+        are used instead.
+
+        Args:
+            value: Total value to allocate (e.g., total quota in m³).
+            attr: Attribute name to set on managed cities (e.g., "quota").
+            by: Attribute name used as weights for proportional allocation.
+                If None, uses equal weights (1.0 for all cities). Common
+                values include "total_area" (irrigated area) for quota
+                allocation.
 
         Returns:
-            一个数组，包括所有主体的水资源额度。
+            NumPy array containing the allocated values for each managed
+            city, in the same order as `self.managed`.
+
+        Raises:
+            ValueError: If there are no managed cities to assign to.
+
+        Example:
+            Allocate quota based on irrigated area:
+
+            ```python
+            # Allocate 1000 m³ total quota proportionally by area
+            allocations = province.assign(
+                value=1000.0,
+                attr="quota",
+                by="total_area"
+            )
+
+            # Each city now has quota set proportionally
+            for city, quota in zip(province.managed, allocations):
+                print(f"{city.city_name}: {quota} m³")
+            ```
+
+        Note:
+            The method updates the attribute on all managed cities
+            automatically. The returned array is for reference/verification.
         """
         # 如果没有任何被管理者，则什么也不做，直接返回。
         if not self.managed:
@@ -177,17 +290,45 @@ class Province(Actor):
         self.managed.update(attr, values)
         return values
 
-    def update_data(
-        self,
-    ) -> None:
-        """更新配额数据和主体数量数据，按需分配给每个其管辖的地级市。
-        权重变量应该是一个字符串，指向一个已经存在于所辖城市主体的动态变量。
+    def update_data(self) -> None:
+        """Update province quota data and allocate to cities.
 
-        Parameters:
-            agents_by:
-                用于分配农民数量的权重变量。
-            quotas_by:
-                用于分配水资源配额的权重变量。
+        This method performs the annual update of water quota allocation:
+            1. Loads the current year's quota from the dynamic variable
+            2. Converts from 1e8 m³ to m³ for internal calculation
+            3. Allocates the quota to all managed cities proportionally
+               based on their total irrigated area
+
+        The allocation uses `self.assign()` with `by="total_area"`, ensuring
+        that cities with larger irrigated areas receive proportionally more
+        quota. This reflects the assumption that larger irrigation areas
+        indicate greater water needs.
+
+        Note:
+            This method is called automatically during the model's step()
+            method. It should be called after cities have updated their
+            irrigated area data for the current year.
+
+        Raises:
+            ValueError: If no cities are managed by this province, or if
+                the quota dynamic variable cannot be accessed.
+
+        Example:
+            Update quota allocation for a year:
+
+            ```python
+            # During model step
+            province.update_data()
+
+            # Check allocations
+            for city in province.managed:
+                print(f"{city.city_name}: {city.quota} 1e8 m³")
+            ```
+
+        See Also:
+            - `cwatqim.agents.province.assign`: Proportional allocation method
+            - `cwatqim.core.data_loaders.update_province_csv`: Function for
+                loading province quota data from CSV
         """
         self.quota = self.dynamic_var("quota") * 1e8
         # === logging ===
@@ -200,20 +341,56 @@ class Province(Actor):
         l_p: float,
         mutual: bool = True,
     ) -> int:
-        """更新社会网络。
-        社会网络代表着不同乡村之间的联系。
-        当乡村之间有联系时，他们可以感知到对方的决策信息。
-        如果乡村 A 知道了乡村 B 大量超用水，那么乡村 A 可能会感到不满。
-        这种不满会同时降低两者的社会满意程度。
+        """Update the social network between cities within the province.
 
-        Parameters:
-            l_p:
-                省之间，hub节点的概率。
-            l_c:
-                城市内部的联系概率。
+        This method creates friendship links between cities, enabling social
+        learning and peer influence. The social network allows cities to:
+            - Observe neighbors' water use decisions
+            - Compare their own performance with neighbors
+            - Learn successful strategies from better performers
+            - Experience social costs when neighbors violate rules
+
+        The network is created probabilistically, where each potential link
+        between cities has probability `l_p` of being created. This creates
+        a random graph structure that varies between simulation runs.
+
+        Args:
+            l_p: Probability of creating a link between any two cities
+                within the province. Range [0, 1], where:
+                - 0.0: No links created (isolated cities)
+                - 1.0: All possible links created (fully connected)
+            mutual: If True, links are bidirectional (if A links to B, then
+                B also links to A). If False, links are directed.
 
         Returns:
-            创建的链接数量。
+            Number of links created in the social network. This can be used
+            to verify network connectivity and for logging purposes.
+
+        Example:
+            Create a sparse social network:
+
+            ```python
+            # Create links with 20% probability
+            num_links = province.update_graph(l_p=0.2, mutual=True)
+            print(f"Created {num_links} friendship links")
+
+            # Check a city's friends
+            city = province.managed[0]
+            friends = city.friends
+            print(f"{city.city_name} has {len(friends)} friends")
+            ```
+
+        Note:
+            The social network is updated annually, allowing the network
+            structure to evolve over time. However, in the current
+            implementation, links are recreated each year rather than
+            persisting.
+
+        See Also:
+            - `cwatqim.agents.city.friends`: Property accessing city's
+                social network connections
+            - `cwatqim.agents.city.change_mind`: Social learning using
+                the network
         """
         links = self.managed.random.link("friend", p=l_p, mutual=mutual)
         # 为了方便测试，记录一下链接的数量

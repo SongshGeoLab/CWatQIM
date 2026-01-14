@@ -37,7 +37,32 @@ REQUIRED_COLS = ["MinTemp", "MaxTemp", "Precipitation", "ReferenceET", "Date"]
 
 
 def to_regional_crop(crop: str, province: Optional[str] = None) -> str:
-    """将作物转换为区域作物。"""
+    """Convert crop name to regional crop variant.
+
+    This function maps generic crop names to region-specific variants used
+    by the AquaCrop model. Regional variants account for local growing
+    conditions and seasonal patterns.
+
+    Args:
+        crop: Generic crop name (e.g., "Maize", "Rice", "Wheat").
+        province: Optional province name for wheat season determination.
+            Required for wheat to determine winter vs spring wheat.
+
+    Returns:
+        Regional crop name string. For maize and rice, returns "RegionalMaize"
+        or "RegionalRice". For wheat, calls decide_wheat_season() to determine
+        the appropriate variant.
+
+    Example:
+        ```python
+        # Maize always becomes RegionalMaize
+        to_regional_crop("Maize")  # Returns "RegionalMaize"
+
+        # Wheat depends on province
+        to_regional_crop("Wheat", "Henan")  # Returns "RegionalWheat"
+        to_regional_crop("Wheat", "Gansu")  # Returns "Spring_Wheat"
+        ```
+    """
     if crop in ["Maize", "Rice"]:
         return f"Regional{crop}"
     if crop == "Wheat":
@@ -46,7 +71,25 @@ def to_regional_crop(crop: str, province: Optional[str] = None) -> str:
 
 
 def decide_wheat_season(crop: str, province: Optional[str] = None) -> Crop:
-    """决定小麦的种植季节。"""
+    """Determine wheat season variant based on province location.
+
+    Wheat growing seasons vary by region in China. Northern provinces
+    (Henan, Shandong, Shanxi, Shaanxi) typically grow winter wheat
+    (RegionalWheat), while other regions grow spring wheat.
+
+    Args:
+        crop: Crop name, should be "Wheat" for this function to have effect.
+        province: Province name for determining wheat season. If None or
+            not in the winter wheat region list, returns "Spring_Wheat".
+
+    Returns:
+        Crop object or string. Returns "RegionalWheat" for winter wheat
+        regions, "Spring_Wheat" for others, or the original crop if not wheat.
+
+    Note:
+        The winter wheat provinces list is based on typical agricultural
+        practices in the Yellow River Basin.
+    """
     if crop != "Wheat":
         return crop
     if province in ["Henan", "Shandong", "Shanxi", "Shaanxi"]:
@@ -55,55 +98,92 @@ def decide_wheat_season(crop: str, province: Optional[str] = None) -> Crop:
 
 
 class City(Farmer):
-    """每个城市的主体。
+    """City-level agent representing an irrigation unit in the Yellow River Basin.
 
-    城市是一个灌溉单元，随机的在该地区可耕地上种植。
+    The City class extends the Farmer agent from AquaCrop-abses to represent
+    city-level irrigation decision-making units. Each city agent makes annual
+    decisions about water use, balancing economic benefits (crop yields minus
+    water costs) with social factors (reputation, peer pressure).
 
-    农民主体是对 AquaCrop_abses 中农民主体的一个扩展。
-    AquaCrop-abses 里，农民会根据其所在地块的：
-    1. 土壤类型（沙土、粘土、壤土等）
-    2. 作物类型（水稻、玉米、小麦等）
-    3. 气象资料（逐日尺度的高温/低温、降水、蒸散发）
-
-    以及农民的农田管理因素如：
-    1. 灌溉策略（灌溉量、灌溉频率、灌溉方式等）
-    2. 田间管理策略（薄膜、田梗等）
-
-    从而估算农民的灌溉用水需求，以及作物的潜在产量。
-    还可以使用遗传算法，根据作物的用水量，估计用水的来源。
-    本模型中进行继承，主要是为了模拟农民模仿灌溉策略的社会行为。
+    The agent integrates several modeling components:
+        1. **Crop Simulation**: Uses AquaCrop to simulate crop yields based on:
+           - Soil type (loam, clay, sand, etc.)
+           - Crop type (rice, wheat, maize)
+           - Daily climate data (temperature, precipitation, evapotranspiration)
+           - Irrigation management (amount, frequency, method)
+        2. **Water Source Optimization**: Uses genetic algorithms to optimize
+           the allocation between surface water and groundwater based on
+           economic payoffs
+        3. **Social Learning**: Implements social learning mechanisms where
+           agents observe and learn from better-performing neighbors
 
     Attributes:
-        irr_area:
-            灌溉面积，单位是公顷。
-        irr_method:
-            灌溉方式，取值范围是1-4。
-        crop:
-            作物类型。
+        irr_area (pd.Series): Irrigated area per crop in hectares. Indexed by
+            crop names ("Maize", "Wheat", "Rice").
+        irr_method (int): Irrigation method code (1-4), where higher numbers
+            typically indicate more efficient methods.
+        quota (float): Water quota allocated to this city in units of
+            1e8 m³ (100 million cubic meters).
+        surface_water (float): Annual surface water use in 1e8 m³.
+        ground_water (float): Annual groundwater use in 1e8 m³.
+        boldness (float): Agent's propensity to violate water quota rules.
+            Range [0, 1], where higher values indicate greater willingness
+            to exceed quota. Initialized randomly.
+        vengefulness (float): Agent's tendency to criticize rule-violating
+            neighbors. Range [0, 1], where higher values indicate stricter
+            enforcement of social norms. Initialized randomly.
+        willing (DecisionType): Current decision tendency ("C" for comply,
+            "D" for defect). May be overridden by policy enforcement in
+            certain years.
+        e (float): Economic score, representing net economic benefit from
+            irrigation (crop revenue minus water costs). Range [0, inf).
+        s (float): Social score, representing social satisfaction based on
+            peer evaluations. Range [0, 1], where 1.0 indicates highest
+            satisfaction.
+        payoff (float): Combined score calculated as e * s (when social
+            factors are included) or just e (when only economic factors
+            are considered). Used for ranking and learning.
 
-        quota:
-            水资源配额。
-        surface_water:
-            地表水用量。
-        ground_water:
-            地下水用量。
+    Decision Making:
+        The agent's decision process involves:
+            1. Determining irrigation needs based on crop simulation
+            2. Optimizing water source allocation (surface vs. groundwater)
+            3. Evaluating economic and social payoffs
+            4. Learning from better-performing neighbors
+            5. Updating behavioral parameters (boldness, vengefulness)
 
-        boldness:
-            大胆程度。
-        vengefulness:
-            报复心。
-        willing:
-            是否超过最严格水资源配额进行农业取水的决策。
+    Social Network:
+        Cities are connected through a social network ("friends") that
+        represents information sharing and peer influence. Agents compare
+        their performance with friends and may adopt successful strategies.
 
-        e:
-            经济得分，取值[0~inf)。
-            经济得分是对
-        s:
-            社会得分，取值[0, 1]。
-        payoff:
-            综合得分。
-            决策单元会对比自己的得分和周围人的得分，从而评估自己的排名。
-            而综合得分是经济得分和社会得分各自**排名**的加权平均值。
+    Example:
+        Access city properties and methods:
+
+        ```python
+        # Get a city agent
+        city = model.sel_city(city_id=102)
+
+        # Access water use data
+        print(f"Quota: {city.quota} 1e8 m³")
+        print(f"Surface water: {city.surface_water} 1e8 m³")
+        print(f"Decision: {city.decision}")
+
+        # Simulate crop yields
+        yields = city.simulate(crop="Maize")
+
+        # Get social network
+        friends = city.friends
+        ```
+
+    Note:
+        The City agent inherits from Farmer, which provides crop simulation
+        capabilities through AquaCrop. The social learning and decision-making
+        components are specific to this water quota model.
+
+    See Also:
+        - `cwatqim.agents.province.Province`: Province agents that allocate quotas
+        - `aquacrop_abses.farmer.Farmer`: Base farmer class with crop simulation
     """
 
     valid_decisions: Dict[DecisionType, str] = {
@@ -112,6 +192,32 @@ class City(Farmer):
     }
 
     def __getattr__(self, name: str):
+        """Dynamic attribute access for crop yield properties.
+
+        This method enables convenient access to crop yields using attribute
+        notation. For example, `city.dry_yield_maize` will return the dry
+        yield for maize.
+
+        Supported patterns:
+            - `dry_yield_{crop}`: Returns dry yield for the specified crop
+            - `yield_potential_{crop}`: Returns potential yield for the crop
+
+        Args:
+            name: Attribute name following the pattern above.
+
+        Returns:
+            Yield value (float) for the specified crop, or raises AttributeError
+            if the pattern doesn't match.
+
+        Example:
+            ```python
+            # Access dry yield for maize
+            maize_yield = city.dry_yield_maize
+
+            # Access potential yield for wheat
+            wheat_potential = city.yield_potential_wheat
+            ```
+        """
         if name.startswith("dry_yield"):
             crop_name = name.split("_")[-1].capitalize()
             return self.dry_yield.get(crop_name)
@@ -122,19 +228,60 @@ class City(Farmer):
 
     @property
     def climate_datapath(self) -> Path:
+        """Get the file path to this city's climate data.
+
+        The climate data file is expected to be named `climate_C{city_id}.csv`
+        and located in the directory specified by `self.ds.city_climate_dir`.
+
+        Returns:
+            Path object pointing to the climate data CSV file.
+
+        Raises:
+            AssertionError: If the climate data file does not exist. This
+                typically indicates a configuration error or missing data file.
+
+        Note:
+            The file should contain daily climate data with columns:
+            - Date: Date in datetime format
+            - MinTemp: Minimum temperature (°C)
+            - MaxTemp: Maximum temperature (°C)
+            - Precipitation: Daily precipitation (mm)
+            - ReferenceET: Reference evapotranspiration (mm)
+        """
         dp = Path(self.ds.city_climate_dir) / f"climate_C{self.city_id}.csv"
         assert dp.exists(), f"Climate data file not found: {dp}"
         return dp
 
     @cached_property
     def climate_data(self) -> pd.DataFrame:
-        """Climate data for this city.
+        """Load and cache daily climate data for this city.
 
-        Loads once on first access. Avoids loading during setup when City_ID
-        may not yet be assigned by new_from_gdf.
+        This property loads the city's climate data from CSV on first access
+        and caches it for subsequent use. The data includes daily temperature,
+        precipitation, and evapotranspiration values required for crop
+        simulation.
+
+        The data is filtered to include only required columns and the
+        ReferenceET values are clipped to a minimum of 0.1 mm to avoid
+        numerical issues in crop simulation.
 
         Returns:
-            DataFrame with daily climate data for all available years.
+            DataFrame with daily climate data containing columns:
+                - Date: Datetime index
+                - MinTemp: Minimum temperature (°C)
+                - MaxTemp: Maximum temperature (°C)
+                - Precipitation: Daily precipitation (mm)
+                - ReferenceET: Reference evapotranspiration (mm, clipped >= 0.1)
+
+        Raises:
+            ValueError: If `city_climate_dir` is not configured in the dataset.
+            FileNotFoundError: If the climate data file for this city does
+                not exist.
+
+        Note:
+            This property uses `@cached_property` to ensure the data is loaded
+            only once, even if accessed multiple times. This avoids loading
+            during setup when City_ID may not yet be assigned.
         """
         from pathlib import Path
 
@@ -153,19 +300,40 @@ class City(Farmer):
 
     @property
     def city_id(self) -> int:
-        """City unique identifier from City_ID attribute.
+        """Get the city's unique identifier.
 
-        This property returns the City_ID value which is loaded from the
-        GeoDataFrame when creating city agents. This is different from the
-        ABSESpy internal unique_id.
+        This property returns the City_ID value that was loaded from the
+        shapefile when the city agent was created. This identifier is used
+        for:
+            - Loading city-specific data files (climate, irrigation area, etc.)
+            - Identifying cities in analysis and visualization
+            - Linking cities to external datasets
+
+        Note:
+            This is different from the ABSESpy internal `unique_id`, which
+            is a framework-generated identifier. The `city_id` is the
+            user-defined identifier from the spatial data.
 
         Returns:
-            The city ID from the City_ID attribute.
+            Integer city ID, or None if the City_ID attribute has not been
+            set (e.g., during initialization before shapefile loading).
+
+        Example:
+            ```python
+            city_id = city.city_id  # e.g., 102
+            city_name = city.city_name  # e.g., "C102"
+            ```
         """
         return getattr(self, "City_ID", None)
 
     @property
     def city_name(self) -> str:
+        """Get a formatted string representation of the city ID.
+
+        Returns:
+            String in the format "C{city_id}", e.g., "C102" for city ID 102.
+            This format is commonly used in data file naming conventions.
+        """
         return f"C{self.city_id}"
 
     # ========== Properties for data collection ==========
@@ -238,12 +406,21 @@ class City(Farmer):
 
     @property
     def crop_here(self) -> List[str]:
-        """当前地块上的作物"""
+        """Get list of crops currently grown in this city.
+
+        Returns:
+            List of crop names (strings) that have irrigated area > 0 in
+            this city. Typically contains "Maize", "Wheat", and/or "Rice".
+        """
         return self.irr_area.index.to_list()
 
     @property
     def irr_area(self) -> pd.Series:
-        """总灌溉面积，单位 ha
+        """Get irrigated area per crop in hectares.
+
+        Returns:
+            Pandas Series with crop names as index and irrigated areas
+            (ha) as values. Only crops with area > 0 are included.
 
         Note:
             Irrigated area is stored per-crop as hectare (ha).
@@ -254,12 +431,21 @@ class City(Farmer):
 
     @property
     def total_area(self) -> float:
-        """总灌溉面积，单位 ha"""
+        """Get total irrigated area across all crops in hectares.
+
+        Returns:
+            Sum of all irrigated areas in hectares (ha).
+        """
         return self.irr_area.sum()
 
     @property
     def water_used(self) -> pd.Series:
-        """总用水量，单位亿立方米
+        """Get water use per crop in units of 1e8 m³.
+
+        Returns:
+            Pandas Series with crop names as index and water use volumes
+            (1e8 m³) as values. Calculated as irrigated area (ha) multiplied
+            by water use intensity (mm) and converted to 1e8 m³.
 
         Implementation detail:
             Convert ha*mm to 1e8 m^3. The helper uses factor 10 to get m^3
@@ -269,12 +455,22 @@ class City(Farmer):
 
     @property
     def total_wu(self) -> float:
-        """总用水量"""
+        """Get total water use across all crops in 1e8 m³.
+
+        Returns:
+            Sum of water use for all crops in units of 1e8 m³ (100 million
+            cubic meters).
+        """
         return self.water_used.sum()
 
     @property
     def net_irr(self) -> float:
-        """总灌溉量，单位亿立方米
+        """Get total net irrigation volume in 1e8 m³.
+
+        Returns:
+            Total net irrigation volume across all crops in units of 1e8 m³.
+            Calculated from seasonal irrigation depth (mm) multiplied by
+            irrigated area (ha) and converted to 1e8 m³.
 
         Note:
             seasonal_irrigation is in mm, multiply by area (ha) and convert
@@ -287,10 +483,17 @@ class City(Farmer):
 
     @property
     def province(self) -> Province:
-        """该城市所在的省份对象，见`Province`类。
-        如果还没设置，则返回 None。
+        """Get the province agent that manages this city.
 
-        设置该属性时，可以设置已经创建好的省对象，也可以使用每个省唯一的省份名称。
+        Returns:
+            Province agent instance. Returns None if not yet set during
+            initialization.
+
+        Note:
+            When setting this property, you can provide either:
+            - A Province agent instance that has already been created
+            - A province name string (English name), which will create or
+              retrieve the province using the singleton pattern
         """
         return self._province
 
@@ -309,43 +512,70 @@ class City(Farmer):
 
     @property
     def wui(self) -> float:
-        """
-        灌溉用水是每年为灌溉而提取的水量，包括在输送和田间应用过程中的损失。
-        因此这个数据是统计得来的，而非模型模拟的。
+        """Get water use intensity (WUI) per crop in millimeters.
 
-        Irrigation water use is the annual quantity of water withdrawn for irrigation including the losses during conveyance and field application.
+        Water use intensity represents the annual quantity of water withdrawn
+        for irrigation per unit area, including losses during conveyance and
+        field application. This is empirical data loaded from statistics,
+        not simulated by the model.
+
+        Returns:
+            Pandas Series with crop names as index and WUI values (mm) as
+            values. The WUI represents the depth of water applied per hectare
+            of irrigated area.
+
+        Note:
+            Irrigation water use is the annual quantity of water withdrawn
+            for irrigation including the losses during conveyance and field
+            application. This data comes from statistics rather than model
+            simulation.
         """
         return self.dynamic_var("wui")
 
     @property
     def quota(self) -> float:
-        """水资源配额，单位：亿立方米 (1e8 m³)
+        """Get water quota allocated to this city in 1e8 m³.
 
-        配额以体积形式存储和比较，与 surface_water、ground_water 的单位一致。
+        The water quota represents the maximum allowable surface water use
+        for this city. It is allocated by the province based on irrigated
+        area and stored in units consistent with surface_water and
+        ground_water for easy comparison.
 
-        Internal storage:
+        Returns:
+            Water quota in units of 1e8 m³ (100 million cubic meters).
+
+        Note:
+            Internal storage:
             _quota stores raw volume in m^3; getter converts to 1e8 m^3.
         """
-        return self._quota / 1e8  # 从立方米转换为亿立方米
+        return self._quota / 1e8  # Convert from m³ to 1e8 m³
 
     @quota.setter
     def quota(self, volume_m3: float) -> None:
-        """设置水资源配额
+        """Set water quota for this city.
 
-        Parameters:
-            volume_m3:
-                配额体积，单位：立方米 (m³)
+        Args:
+            volume_m3: Quota volume in cubic meters (m³). The value is stored
+                internally in m³ and converted to 1e8 m³ when accessed via the
+                property getter.
         """
         self._quota = float(volume_m3)
 
     @property
     def decision(self) -> DecisionType:
-        """实际的用水决策。
+        """Get the actual water use decision based on quota compliance.
 
-        如果利用的黄河地表水资源超过了配额，那么就视为违反了制度（D）
-        否则，就是遵守制度（C）
+        The decision is determined by comparing actual surface water use
+        against the allocated quota:
+            - "D" (Defect): If surface water use exceeds quota (violation)
+            - "C" (Cooperate): If surface water use is within quota (compliance)
 
-        单位：surface_water 和 quota 都是亿立方米 (1e8 m³)
+        Returns:
+            Decision type: "C" for compliance or "D" for defect.
+
+        Note:
+            Units: Both surface_water and quota are in 1e8 m³ (100 million
+            cubic meters) for consistent comparison.
         """
         if self.surface_water > self.quota:
             return "D"
@@ -353,28 +583,66 @@ class City(Farmer):
 
     @property
     def water_prices(self) -> Dict[str, float]:
-        """水价数据，单位是元/立方米。"""
+        """Get water prices for surface and groundwater in RMB/m³.
+
+        Returns:
+            Dictionary with keys "surface" and "ground" containing water
+            prices in RMB per cubic meter (RMB/m³).
+        """
         return self.province.water_prices
 
     @property
     def crop_prices(self) -> Dict[str, float]:
-        """作物价格数据，原始单位是元/kg，转化后单位是元/吨。"""
+        """Get crop prices in RMB per tonne.
+
+        Returns:
+            Dictionary mapping crop names to prices. Original data is in
+            RMB/kg but is converted to RMB/t (multiplied by 1000) for
+            consistency with yield units (t/ha).
+        """
         return self.province.crop_prices
 
     @property
     def include_s(self) -> bool:
-        """是否包含社会得分。"""
+        """Check whether social factors should be included in payoff calculation.
+
+        Returns:
+            True if social factors should be included, False otherwise.
+            Currently always returns True, but can be configured based on
+            simulation year if needed.
+        """
         # return self.time.year >= self.p.include_s_since
         return True
 
     def setup(self) -> None:
-        """添加自动变化的动态数据，完成农民主体的初始化。
+        """Initialize the city agent with dynamic variables and attributes.
 
-        在初始化时，农民主体会完成以下几个步骤：
-        1. 初始化农田相关的属性。
-        2. 初始化水相关的属性。
-        3. 初始化社会相关的属性。
-        4. 初始化得分相关的属性。
+        This method is called automatically during model setup to configure
+        the city agent with:
+            1. **Dynamic Variables**: Time-varying data loaded from CSV files:
+               - `wui`: Water use intensity (mm) per crop, varies by year
+               - `irr_area`: Irrigated area (ha) per crop, varies by year
+            2. **Farm Attributes**: Irrigation method and related settings
+            3. **Water Attributes**: Initial values for quota and water use
+            4. **Social Attributes**: Random initialization of behavioral
+               parameters (boldness, vengefulness) and initial decision
+            5. **Score Attributes**: Initial economic and social scores
+
+        The dynamic variables use update functions that extract year-specific
+        data from the loaded DataFrames based on the current simulation year.
+
+        Note:
+            This method should not be called manually. It is invoked
+            automatically by the ABSESpy framework during model initialization.
+
+        Raises:
+            FileNotFoundError: If required data files (irr_wui, irr_area_ha)
+                are not found in the configured data paths.
+            KeyError: If required columns are missing from the data files.
+
+        See Also:
+            - `cwatqim.core.data_loaders.update_city_csv`: Function for updating
+                city data from CSV files
         """
         self.add_dynamic_variable(
             name="wui",
@@ -386,42 +654,106 @@ class City(Farmer):
             data=pd.read_csv(self.ds.irr_area_ha, index_col=0),
             function=update_city_csv,
         )
-        # ===== 农田相关 =====
+        # ===== Farm-related attributes =====
         self.irr_method = 4
-        # ===== 水相关 =====
+        # ===== Water-related attributes =====
         self._quota = 0.0
         self.surface_water = 0.0
         self.ground_water = 0.0
-        # ===== 社会相关 =====
+        # ===== Social-related attributes =====
         self.boldness = self.random.random()
         self.vengefulness = self.random.random()
         self.willing = self.make_decision()
-        # ===== 得分相关 =====
+        # ===== Score-related attributes =====
         # income: -inf~inf
         # social benefits: 0~1
         self.agg_payoff(e=0.0, s=1.0, record=True, rank=False, include_s=self.include_s)
 
     def calc_max_irr_seasonal(self, crop: str) -> float:
-        """计算最大灌溉量。"""
+        """Calculate maximum seasonal irrigation depth for a crop.
+
+        This method calculates the maximum irrigation depth (in mm) that can
+        be applied to a crop, accounting for:
+            - The crop's water use intensity (WUI)
+            - The proportion of surface water vs. groundwater
+            - Irrigation efficiency for each water source
+
+        The calculation weights the WUI by the surface/groundwater ratio
+        and their respective irrigation efficiencies. This accounts for the
+        fact that different water sources have different application
+        efficiencies.
+
+        Args:
+            crop: Crop name ("Maize", "Wheat", or "Rice") for which to
+                calculate maximum irrigation.
+
+        Returns:
+            Maximum seasonal irrigation depth in millimeters (mm). This value
+            is used by AquaCrop to constrain irrigation applications.
+
+        Formula:
+            max_irr = WUI * (sw_ratio * sw_eff + gw_ratio * gw_eff)
+
+            Where:
+            - WUI: Water use intensity for the crop (mm)
+            - sw_ratio: Surface water proportion
+            - gw_ratio: Groundwater proportion
+            - sw_eff: Surface water irrigation efficiency
+            - gw_eff: Groundwater irrigation efficiency
+
+        Note:
+            If both surface_water and ground_water are zero, the calculation
+            will result in NaN. This should be handled by the calling code.
+        """
         wui = self.wui[crop]
         sw = self.surface_water / (self.surface_water + self.ground_water)
         gw = self.ground_water / (self.surface_water + self.ground_water)
         return wui * sw * self.province.sw_irr_eff + wui * gw * self.province.gw_irr_eff
 
     def simulate(self, crop: Optional[Crop] = None, repeats: int = 1) -> pd.DataFrame:
-        """模拟一个生长季的作物产量。
+        """Simulate crop growth and yield for one growing season.
 
-        如果作物为空，则模拟所有作物。
+        This method runs the AquaCrop model to simulate crop growth based on:
+            - Daily climate data (temperature, precipitation, ET)
+            - Soil properties (default: loam)
+            - Crop type and regional variant
+            - Irrigation management strategy
+            - Initial soil water content
 
-        Parameters:
-            crop:
-                作物类型，如 "Wheat", "Maize", "Rice"。
-                如果为 None，则模拟所有在该地区种植的作物。
-            repeats:
-                重复模拟次数，用于平均多次模拟结果。
+        The simulation can be run for a single crop or all crops grown in
+        the city. When simulating all crops, the results are aggregated into
+        a single DataFrame.
+
+        Args:
+            crop: Crop name to simulate ("Wheat", "Maize", "Rice"). If None,
+                simulates all crops that have irrigated area > 0 in this city.
+            repeats: Number of simulation repeats to average. Currently not
+                fully implemented - each repeat would use the same conditions.
 
         Returns:
-            作物模拟结果的 DataFrame。
+            DataFrame containing simulation results. For a single crop, returns
+            a Series-like row with columns:
+                - "Seasonal irrigation (mm)": Total irrigation applied
+                - "Yield (tonne/ha)": Crop yield
+                - "Seasonal transpiration (mm)": Water transpired
+                - Other AquaCrop output variables
+
+            For multiple crops, returns a DataFrame with one row per crop,
+            plus an additional column "Irrigation volume (1e8m3)" showing
+            total irrigation volume converted to 1e8 m³.
+
+        Note:
+            The simulation uses cached climate data for efficiency. The crop
+            type is automatically regionalized (e.g., "Wheat" -> "RegionalWheat"
+            for winter wheat regions) based on the province location.
+
+        Raises:
+            FileNotFoundError: If climate data file is missing.
+            ValueError: If crop name is invalid or crop has no irrigated area.
+
+        See Also:
+            - `aquacrop.core.AquaCropModel`: The underlying crop simulation model
+            - `cwatqim.agents.city.to_regional_crop`: Function for regionalizing crops
         """
         if crop is None:
             # Simulate all crops in this area
@@ -470,38 +802,76 @@ class City(Farmer):
         ga_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Tuple[float, float]:
-        """估算取水方式。
+        """Optimize water source allocation using genetic algorithm.
 
-        通过遗传算法优化表面水和地下水的取水量。
-        用户可以自定义收益函数，这个收益函数需允许接受以下三个参数：
-        - crop_yield: 作物产量，是一个 Series，分别是不同类型作物的产量。
-        - q_surface: 表面水取水量，是一个浮点数。
-        - q_ground: 地下水取水量，是一个浮点数。
+        This method uses differential evolution (a genetic algorithm) to find
+        the optimal allocation of surface water and groundwater that maximizes
+        the agent's payoff function. The optimization considers:
+            - Crop yields (which depend on total irrigation)
+            - Water prices (different for surface and groundwater)
+            - Crop prices
+            - Social costs (if included in the payoff function)
 
-        如果用户不输入自定义函数，优化的目标是最大化经济收益。
-        需要输入一个 water_prices 的参数，这个参数是一个字典，包含两个键值对：
-        - "surface": 表面水价格。
-        - "ground": 地下水价格。
+        The optimization problem is:
+            maximize: payoff(crop_yield, q_surface, q_ground, ...)
+            subject to: q_surface + q_ground = total_irrigation
+                        q_surface in [surface_lb, surface_ub]
 
-        Parameters:
-            ufunc:
-                自定义的收益函数。
-            surface_lb:
-                表面水取水量的下限。
-            yield_col:
-                作物产量的列名。
-            ga_kwargs:
-                传递给遗传算法的参数。
-            **kwargs:
-                传递给收益函数的参数。
+        Args:
+            ufunc: Custom utility/payoff function. If None, uses
+                `economic_payoff` which maximizes net economic benefit.
+                The function must accept:
+                - crop_yield: Dict[str, float] of crop yields (t/ha)
+                - q_surface: float, surface water use
+                - q_ground: float, groundwater use
+                - Additional kwargs (water_prices, crop_prices, area, unit)
+            total_irrigation: Total irrigation requirement in mm. If None,
+                uses `self.seasonal_irrigation`.
+            surface_boundaries: Tuple of (lower_bound, upper_bound) for
+                surface water use in mm. If None, uses (0.0, total_irrigation).
+            crop_yield: Attribute name or dict containing crop yields.
+                Default "dry_yield" accesses `self.dry_yield`.
+            ga_kwargs: Additional parameters for differential_evolution:
+                - popsize: Population size multiplier (default: 15)
+                - maxiter: Maximum iterations (default: 100)
+                - polish: Use L-BFGS-B to polish solution (default: True)
+                - seed: Random seed (default: None)
+            **kwargs: Additional arguments passed to the payoff function.
+                Required if ufunc is None:
+                - water_prices: Dict with "surface" and "ground" keys (RMB/m³)
+                - crop_prices: Dict with crop names as keys (RMB/t)
+                - area: Optional, irrigation area (ha)
 
         Returns:
-            最优的表面水和地下水取水量。
+            Tuple of (q_surface_opt, q_ground_opt) in mm, representing the
+            optimal allocation of surface water and groundwater.
 
         Raises:
-            ValueError:
-                如果表面水取水量超出范围。
-                或者没有提供自定义函数，但是缺少了 water_prices 参数。
+            ValueError: If surface_boundaries are invalid (negative, exceed
+                total_irrigation, or lower > upper), or if ufunc is None but
+                water_prices is missing from kwargs.
+            Warning: If total_irrigation is zero, returns (0.0, 0.0) and logs
+                a warning.
+
+        Example:
+            Optimize water allocation with default economic payoff:
+
+            ```python
+            water_prices = {"surface": 0.5, "ground": 0.8}  # RMB/m³
+            crop_prices = {"Maize": 2000, "Wheat": 2500}  # RMB/t
+
+            sw, gw = city.water_withdraw(
+                total_irrigation=500.0,  # mm
+                water_prices=water_prices,
+                crop_prices=crop_prices,
+                area=city.total_area
+            )
+            ```
+
+        Note:
+            The optimization uses scipy's differential_evolution, which is
+            robust to local optima but may be slower than gradient-based
+            methods. The default parameters are tuned for this application.
         """
         if total_irrigation is None:
             total_irrigation = self.seasonal_irrigation
@@ -568,11 +938,15 @@ class City(Farmer):
         self,
         layer: Optional[PatchModule] = None,
     ) -> ActorsList[CropCell]:
-        """获取这个城市的所有土地单元。
+        """Get all land cells (patches) within this city's geometry.
 
-        Parameters:
-            layer:
-                土地单元所在的图层。
+        Args:
+            layer: The patch layer to select from. If None, uses the model's
+                major layer (typically the main spatial layer).
+
+        Returns:
+            ActorsList of CropCell objects representing land patches within
+            the city's boundary.
         """
         if layer is None:
             layer = self.model.nature.major_layer
@@ -580,27 +954,49 @@ class City(Farmer):
 
     @property
     def friends(self) -> ActorsList[Farmer]:
-        """周围的“朋友”。
+        """Get neighboring agents in the social network ("friends").
 
-        主体会因在周围人的评价中改变自己的行为偏好，以及感知自己的收益。
-        为了在多主体模型中模拟这一行为，我们使用来自 ”多元文化理论” 进行建模。
+        The social network represents information sharing and peer influence
+        between cities. Agents observe their friends' decisions and
+        performance, which influences their own behavioral preferences and
+        perceived payoffs. This mechanism is based on multi-cultural theory
+        for modeling social learning in multi-agent systems.
 
         Returns:
-            周围的朋友列表（一个主体列表），其中是与本农民有链接“friend”的主体。
+            ActorsList of City agents that are linked to this agent through
+            the "friend" relationship. These are the agents whose behavior
+            and performance this agent can observe and learn from.
         """
         return self.link.get("friend", default=True)
 
     @property
     def willing(self) -> DecisionType:
-        """农民超过水资源配额的意愿，但意愿并不代表最终决策。
+        """Get the agent's willingness to exceed water quota (decision tendency).
 
-        只有两个可能的取值：
-        - D: 如果作物有需要，且经济实惠，则可能会违反最严格水资源配额。
-        - C: 遵循最严格水资源配额。作物的额外需要会用地下水进行灌溉。
+        This property represents the agent's behavioral tendency, which may
+        differ from the actual decision based on policy enforcement. The
+        willingness can take two values:
+            - "D" (Defect): Willing to violate quota if crops need water and
+              it is economically beneficial. Additional water needs will be
+              met using surface water beyond quota.
+            - "C" (Cooperate): Willing to comply with quota. Additional water
+              needs will be met using groundwater instead of exceeding quota.
 
-        当年份大于等于设置的强制年份时，农民会强制遵守规则。
-        这一设定对应着一种政策，即在某一年份之后，农民必须遵守水资源配额。
-        黄河历史上，强制的水资源分配政策在 1999 年开始正式实施。
+        Policy enforcement:
+            - Before `include_s_since` year: Always returns "D" (no social
+              factors considered)
+            - After `forced_since` year: Always returns "C" (mandatory
+              compliance enforced by policy)
+            - Between these years: Returns the agent's internal `_willing`
+              value (behavioral tendency)
+
+        Note:
+            This property models the historical policy change in the Yellow
+            River Basin, where mandatory water allocation policies were
+            officially implemented starting in 1999.
+
+        Returns:
+            Decision tendency: "C" for compliance or "D" for defect.
         """
         if self.time.year < self.p.get("include_s_since"):
             return "D"
@@ -615,20 +1011,28 @@ class City(Farmer):
         self._willing = value
 
     def compare(self, attr: str, my: Optional[float] = None) -> float:
-        """和朋友之间针对某属性进行比较。
+        """Compare own attribute value with friends' values and return normalized rank.
 
-        Parameters:
-            attr:
-                要计算的属性名称。
-                将使用 `ActorsList.array` 方法获取朋友的属性值数组。
-            my:
-                自己值，如果没有给定，则使用同样的属性值。
+        This method calculates a normalized ranking of the agent's attribute
+        value relative to friends in the social network. The ranking is used
+        for social learning and payoff calculation.
+
+        Args:
+            attr: Attribute name to compare. The method uses `ActorsList.array`
+                to get an array of friends' attribute values.
+            my: Own attribute value. If None, uses `self.get(attr)` to get
+                the value from the agent's attributes.
 
         Returns:
-            计算归一化的属性值，用[0, 1]的值表征自己在朋友中的属性排名，即：
-            - 如果自己的属性值是最大的，那么返回 1.0（最优）
-            - 如果所有人的属性值都一样，同样返回 1.0（平均主义）
-            - 如果自己的属性值是最小的，那么返回 0.0（最差）
+            Normalized rank in range [0, 1], where:
+                - 1.0: Best rank (own value is maximum among all)
+                - 1.0: Also returned if all values are equal (egalitarian)
+                - 0.0: Worst rank (own value is minimum among all)
+            The value represents the agent's relative position in the social
+            network for this attribute.
+
+        Note:
+            If the agent has no friends, returns 1.0 (best rank by default).
         """
         if not self.friends:
             return 1.0
@@ -643,31 +1047,58 @@ class City(Farmer):
         self,
         q_surface: float,
     ) -> float:
-        """计算社会成本，包括：
-        1. 违反规则而导致的声誉损失
-        2. 由于周围村庄违反规则而产生的不满
-        两者的权重由参数 `s_enforcement_cost` 和 `s_reputation` 控制。
-        使用柯布-道格拉斯方程进行计算，因此每一个社会成本都是0-1的数值。
+        """Calculate social costs based on rule compliance and peer behavior.
 
-        当地表水用量超过配额时，视为一个违规行为。
-        违规会导致社会成本的增加，但是这个增加是一个非线性的过程。
-        同样违反规则的决策，产生的社会成本取决于周围相比较的人的行为：
+        This method implements a social cost function that captures two
+        mechanisms:
+            1. **Reputation Loss**: Cost from being criticized by neighbors
+               when violating rules
+            2. **Social Discontent**: Cost from observing neighbors violate
+               rules while oneself complies
 
-        1. 如果周围人都是遵守规则的人，那么违规的决策会导致更大的声誉损失
-        2. 如果周围人都是违规的人，那么合作的决策会导致自己的社会不满，
-        这意味着违反规则反而形成了一种社会风气，反而不会遭受损失。
+        The social cost is calculated using a Cobb-Douglas function, which
+        creates a non-linear relationship between violations and costs. The
+        cost depends not only on the agent's own behavior but also on the
+        behavior of neighbors in the social network.
 
-        Parameters:
-            q_surface:
-                地表水用量，单位：亿立方米 (1e8 m³)。
-                这个数值将被用来和配额进行比较，以判断是否违规。
+        Key mechanisms:
+            - If an agent violates rules (q_surface > quota) when neighbors
+              comply, they face high reputation loss
+            - If an agent complies when neighbors violate, they experience
+              social discontent (feeling of unfairness)
+            - If both agent and neighbors violate, social costs are lower
+              (violation becomes normalized)
+
+        The calculation uses parameters:
+            - `s_enforcement_cost`: Weight for social discontent (default: 0.5)
+            - `s_reputation`: Weight for reputation loss (default: 0.5)
+
+        Args:
+            q_surface: Surface water use in units of 1e8 m³ (100 million m³).
+                This value is compared with `self.quota` to determine if
+                the agent is violating rules.
 
         Returns:
-            社会成本，一个0-1之间的数值。
-            是声誉损失和社会不满的等权平均值。
+            Social cost value in the range [0, 1], where:
+                - 0.0: No social cost (best case)
+                - 1.0: Maximum social cost (worst case)
+            The value is the equal-weighted average of enforcement cost and
+            reputation loss.
+
+        Note:
+            The social cost calculation is based on multi-cultural theory
+            and peer evaluation mechanisms. The Cobb-Douglas function ensures
+            that costs increase non-linearly with the number of violations
+            observed or committed.
+
+        See Also:
+            - `cwatqim.core.payoff.lost_reputation`: Function calculating
+                reputation loss using Cobb-Douglas
+            - `cwatqim.agents.city.judge_friends`: Method for evaluating
+                neighbor behavior
         """
-        # 根据地表水可能的用量和配额比较，判断是否违规
-        # q_surface 和 self.quota 都是亿立方米 (1e8 m³)
+        # Compare potential surface water use with quota to determine violation
+        # Both q_surface and self.quota are in 1e8 m³
         willing: DecisionType = "D" if q_surface > self.quota else "C"
         dislikes, criticized = self.judge_friends(willing=willing)
         s_enforcement_cost = self.p.get("s_enforcement_cost", 0.5)
@@ -688,22 +1119,53 @@ class City(Farmer):
         crop_prices: Optional[dict] = None,
         **kwargs,
     ) -> float:
-        """聚合自己的综合得分，取决于自己经济水平和社会水平。
+        """Calculate combined economic and social payoff.
 
-        Parameters:
-            crop_yield:
-                作物产量，单位是吨/公顷。
-            q_surface:
-                地表水用量，单位是亿立方米 (1e8 m³)。
-            q_ground:
-                地下水用量，单位是亿立方米 (1e8 m³)。
-            water_prices:
-                水资源价格，一个字典，包括地表水和地下水的价格。
-            crop_prices:
-                作物价格，一个字典，包括作物的价格。
+        This method aggregates the agent's economic and social performance
+        into a single payoff value. The payoff combines:
+            - Economic score (e): Net economic benefit from crop production
+              minus water costs
+            - Social score (s): Social satisfaction based on peer evaluations
+
+        The final payoff is calculated as:
+            - If social factors included: payoff = e * s
+            - If only economic: payoff = e
+
+        The economic score is calculated using `economic_payoff`, which
+        considers crop revenue and water costs. The social score is calculated
+        using `calc_social_costs`, which considers rule compliance and peer
+        behavior.
+
+        Args:
+            crop_yield: Dictionary mapping crop names to yields in tonnes/ha.
+                Keys should be "Maize", "Wheat", "Rice".
+            q_surface: Surface water use in 1e8 m³.
+            q_ground: Groundwater use in 1e8 m³.
+            water_prices: Dictionary with water prices in RMB/m³. Should
+                contain keys "surface" and "ground". If None, uses
+                `self.water_prices`.
+            crop_prices: Dictionary with crop prices in RMB/t. Keys should
+                match crop names. If None, uses `self.crop_prices`.
+            **kwargs: Additional arguments passed to `agg_payoff`, including:
+                - record: Whether to store scores as attributes (default: False)
+                - rank: Whether to convert scores to rankings (default: False)
+                - include_s: Whether to include social factors (default: True)
 
         Returns:
-            综合得分，一个0-1之间的数值，代表主体的最后综合收益。
+            Combined payoff value. The range depends on whether ranking is
+            used:
+                - With ranking: [0, 1] (normalized relative to peers)
+                - Without ranking: [0, inf) for economic, [0, 1] for social
+
+        Note:
+            This method is typically called during water source optimization
+            to evaluate different allocation strategies. The final payoff
+            after optimization is recorded using `record=True`.
+
+        See Also:
+            - `cwatqim.core.payoff.economic_payoff`: Economic benefit calculation
+            - `cwatqim.agents.city.calc_social_costs`: Social cost calculation
+            - `cwatqim.agents.city.agg_payoff`: Payoff aggregation method
         """
         e = economic_payoff(
             q_surface=q_surface,
@@ -725,32 +1187,72 @@ class City(Farmer):
         include_s: bool = True,
         rank: Optional[bool] = False,
     ) -> float:
-        """计算最终的综合得分。
+        """Aggregate economic and social scores into final payoff.
 
-        Parameters:
-            e:
-                经济得分，取值[0~inf)。
-            s:
-                社会得分，取值[0, 1]。
-            record:
-                是否记录得分为属性。
-                当在遗传算法模拟时，不需要记录得分，
-                只需要返回一个当前模拟的结果就好。
-                但在模拟完成后，对最优的决策单元进行评估时，
-                需要记录得分，以便后续的分析。
-            include_s:
-                是否将社会得分的考虑包含在最终得分中。
-                如果为 False，那么最终得分就是经济得分。
-            rank:
-                是否将得分转化为排名。
-                当在遗传算法模拟时，需要转化为排名。
-                在模拟完成后，对最优的决策单元进行评估时，
-                不需要转化为排名，而是对真实的得分进行记录。
+        This method combines economic and social scores into a single payoff
+        value that represents the agent's overall performance. The method
+        supports two modes:
+            1. **Ranking mode**: Converts absolute scores to relative rankings
+               within the social network (used during optimization)
+            2. **Absolute mode**: Uses raw scores (used for final evaluation)
+
+        The payoff calculation:
+            - If ranking: Converts both e and s to [0, 1] rankings, then
+              multiplies: payoff = rank_e * rank_s
+            - If not ranking: Uses raw scores: payoff = e * s (or just e)
+
+        Args:
+            e: Economic score, representing net economic benefit. Range
+                typically [0, inf), but can be negative if costs exceed
+                revenue.
+            s: Social score, representing social satisfaction. Range [0, 1],
+                where 1.0 is maximum satisfaction.
+            record: If True, stores the scores as agent attributes (self.e,
+                self.s, self.payoff). Set to False during optimization to
+                avoid side effects.
+            include_s: If True, includes social factors in payoff calculation.
+                If False, payoff = e (economic only).
+            rank: If True, converts scores to relative rankings within the
+                social network before aggregation. This is useful during
+                optimization to compare performance relative to peers rather
+                than absolute values.
 
         Returns:
-            综合得分，一个0-1之间的数值，代表主体的最后综合收益。
+            Final payoff value. Range depends on mode:
+                - Ranking mode: [0, 1]
+                - Absolute mode with social: [0, inf) (depends on e)
+                - Absolute mode without social: [0, inf) (same as e)
+
+        Example:
+            Calculate payoff during optimization (with ranking):
+
+            ```python
+            payoff = city.agg_payoff(
+                e=economic_score,
+                s=social_score,
+                rank=True,  # Compare relative to friends
+                record=False  # Don't store during optimization
+            )
+            ```
+
+            Calculate and record final payoff:
+
+            ```python
+            payoff = city.agg_payoff(
+                e=economic_score,
+                s=social_score,
+                rank=False,  # Use absolute scores
+                record=True  # Store for analysis
+            )
+            # Now city.e, city.s, city.payoff are set
+            ```
+
+        Note:
+            The ranking mechanism uses the `compare` method to normalize
+            scores relative to friends in the social network. This creates
+            a competitive dynamic where agents compare themselves to peers.
         """
-        # 将经济得分和社会得分转化为在朋友之间的排名
+        # Convert economic and social scores to relative rankings among friends
         if rank:
             e = self.compare("e", my=e)
             s = self.compare("s", my=s)
@@ -765,23 +1267,35 @@ class City(Farmer):
         return payoff
 
     def make_decision(self) -> DecisionType:
-        """
-        根据该主体的大胆程度（boldness）随机采取一个决策。
-        大胆程度就是随机出`D`决策的概率。
+        """Make a random decision based on the agent's boldness parameter.
+
+        The decision is probabilistically determined by the agent's boldness
+        value, which represents the probability of choosing "D" (defect)
+        over "C" (cooperate).
+
+        Returns:
+            Decision type: "D" with probability equal to boldness, "C" otherwise.
         """
         return "D" if self.random.random() < self.boldness else "C"
 
     def mutate_strategy(self, probability: float) -> None:
-        """随机更新自己的策略。
+        """Randomly mutate behavioral strategy with given probability.
 
-        为避免陷入局部最优，
-        以小概率对关键属性`boldness`与`vengefulness`进行完全的随机。
-        如果随机数小于给定的概率阈值，那么就会以各50%的概率触发其中一个属性，
-        对所选的属性进行随机（0-1之间）。
+        This method implements strategy mutation to avoid getting trapped in
+        local optima. With a small probability, it randomly resets one of the
+        key behavioral parameters (boldness or vengefulness) to a new random
+        value.
 
-        Parameters:
-            probability:
-                重新随机的概率，应该在0-1之间。
+        The mutation process:
+            1. Generate random number; if > probability, no mutation occurs
+            2. If mutation occurs, randomly select boldness or vengefulness
+               (50% chance each)
+            3. Reset selected parameter to random value in [0, 1]
+
+        Args:
+            probability: Probability of mutation occurring, should be in range
+                [0, 1]. Typical values are small (e.g., 0.01-0.1) to allow
+                occasional exploration without disrupting convergence.
         """
         if self.random.random() > probability:
             return
@@ -791,49 +1305,66 @@ class City(Farmer):
             self.vengefulness = self.random.random()
 
     def hate_a_behave(self, behave: DecisionType) -> bool:
-        """是否讨厌一个行为，从而产生社会不满。
-        判断标准如下：
-        1. 自己是违反规则的人，不会讨厌别人。
-        2. 对方是遵守规则的人，不会讨厌。
-        3. 对方是违反规则的人，但自己可能因为报复心不强而睁一只眼闭一只眼。
+        """Determine whether to dislike a behavior, generating social discontent.
 
-        Parameters:
-            behave:
-                对方的行为。
+        This method implements the judgment mechanism for evaluating others'
+        behavior. The decision follows these rules:
+            1. If the agent itself is violating rules ("D"), it will not
+               criticize others (no moral authority)
+            2. If the other agent is complying ("C"), there is nothing to
+               criticize
+            3. If the other agent is violating ("D"), the agent may or may
+               not criticize based on its vengefulness parameter
+
+        Args:
+            behave: The other agent's decision behavior ("C" or "D").
 
         Returns:
-            是否讨厌这个行为。
+            True if the agent dislikes the behavior (will generate social
+            discontent), False otherwise.
         """
-        # 自己就是违反规则的人，没资格说别人
+        # If agent itself is violating rules, has no authority to criticize
         if self.decision == "D":
             return False
-        # 对方是遵守规则的人，不会被批评
+        # If other agent is complying, nothing to criticize
         if behave == "C":
             return False
-        # 对方是违反规则的人，但自己可能睁一只眼闭一只眼
+        # If other agent is violating, may criticize based on vengefulness
         return self.random.random() <= self.vengefulness
 
     def judge_friends(self, willing: DecisionType) -> Tuple[int, int]:
-        """评价自己的朋友，是不是喜欢它们。
+        """Evaluate friends' behavior and calculate social costs.
 
-        这个方法来源于前人发表在 Nature Human Behavior 上的一篇文献 [@castillarho2017a]，其核心思想也是基于多元文化理论。
-        如果主体发现周围人在违反规则，但自己是遵守规则的，就会觉得社会不公。
+        This method implements peer evaluation based on multi-cultural theory,
+        inspired by research published in Nature Human Behavior [@castillarho2017a].
+        The mechanism captures how agents perceive fairness and social norms:
 
-        如果主体自己的属性 “vengefulness” （报复心）很强，
-        他会讨厌这个“不守规矩”的朋友，
-        从而降低自己和那个那个被讨厌的朋友在这个社会中的幸福感。
+        Key mechanisms:
+            - If an agent observes neighbors violating rules while itself
+              complies, it experiences social discontent (feeling of unfairness)
+            - If an agent's vengefulness is high, it will strongly dislike
+              rule-violating friends, reducing both agents' social satisfaction
+            - This creates a feedback mechanism where social costs depend on
+              both own and neighbors' behavior
 
-        Parameters:
-            willing:
-                自己的决策倾向。
-                在遗传算法中，这个参数时一个临时的决定意向，
-                如果该意向会给自己带来更多的收益，那么就会倾向于采取这个意向。
+        Args:
+            willing: The agent's own decision tendency. In the genetic algorithm
+                context, this is a temporary decision intention being evaluated.
+                If this intention leads to higher payoff, the agent will tend
+                to adopt it.
 
         Returns:
-            讨厌的朋友数量（影响不满程度），
-            以及被批评的朋友数量（影响声誉评估）。
+            Tuple of (dislikes, criticized) where:
+                - dislikes: Number of friends the agent dislikes (affects
+                  social discontent level)
+                - criticized: Number of friends who criticize the agent's
+                  behavior (affects reputation assessment)
+
+        Note:
+            The method iterates through all friends and evaluates each
+            relationship bidirectionally.
         """
-        # 和每一个朋友进行评判
+        # Evaluate each friend
         dislikes, criticized = 0, 0
         for friend in self.friends:
             dislikes += self.hate_a_behave(friend.decision)
@@ -841,27 +1372,58 @@ class City(Farmer):
         return dislikes, criticized
 
     def change_mind(self, metric: str, how: str) -> bool:
-        """由于主体最后的表现不同，主体之间可能存在强化学习行为。
+        """Learn behavioral strategies from better-performing neighbors.
 
-        从表现比较好的朋友处学习。
+        This method implements social learning where agents observe and adopt
+        the behavioral parameters (boldness, vengefulness) of neighbors who
+        perform better according to a specified metric. This creates an
+        evolutionary dynamic where successful strategies spread through the
+        social network.
 
-        Parameters:
-            metric:
-                评价自己或者同伴表现是否优异的关键指标。
-                在这个模型中，我们主要有三种潜在的指标：
-                1. `e`: 经济得分。即抛除用水成本之后灌溉得到的经济收益。
-                2. `s`: 社会得分。即所有农民在评价朋友后得到的社会满意度。
-                3. `payoff`: 综合得分。即经济得分和社会得分的乘积。
-            how:
-                如果有多个比自己表现优异的其他主体，如何从他们身上学习？
-                1. 如果`how='best'`，仅从表现最好的主体身上学习。
-                2. 如果`how=random`，可以从任何一个比自己表现好的个体身上学习。
+        The learning process:
+            1. Identify friends who perform better on the specified metric
+            2. Select one friend based on the `how` parameter
+            3. Copy that friend's boldness and vengefulness values
+            4. Return True if learning occurred, False otherwise
+
+        This mechanism allows the model to explore the strategy space while
+        also exploiting successful strategies found by peers.
+
+        Args:
+            metric: Performance metric for comparison. Options:
+                - "e": Economic score (net economic benefit)
+                - "s": Social score (social satisfaction)
+                - "payoff": Combined score (e * s)
+            how: Learning strategy when multiple better neighbors exist:
+                - "best": Learn from the neighbor with the highest metric value
+                - "random": Learn from a randomly selected better neighbor
 
         Returns:
-            这个主体是否进行了属性的变更。
+            True if the agent learned from a neighbor (attributes were
+            updated), False if no better neighbors were found or learning
+            did not occur.
+
+        Example:
+            Learn from best-performing friend:
+
+            ```python
+            learned = city.change_mind(metric="payoff", how="best")
+            if learned:
+                print(f"Updated boldness: {city.boldness}")
+                print(f"Updated vengefulness: {city.vengefulness}")
+            ```
+
+        Note:
+            This method only updates behavioral parameters, not decision
+            outcomes. The new parameters will influence future decisions but
+            don't retroactively change past behavior.
+
+        See Also:
+            - `cwatqim.agents.city.friends`: Social network connections
+            - `cwatqim.agents.city.mutate_strategy`: Random strategy mutation
         """
         better_friends = self.friends.better(metric=metric, than=self)
-        # 如果没有比自己表现更好的，则直接返回 False
+        # If no better-performing friends, return False
         if not better_friends:
             return False
         elif how == "best":
@@ -870,7 +1432,7 @@ class City(Farmer):
             friend = better_friends.random.choice()
         else:
             raise ValueError(f"Invalid how parameter: {how}")
-        # 存在比自己表现更好的主体，向他学习。
+        # Learn from the better-performing friend
         self.boldness = friend.boldness
         self.vengefulness = friend.vengefulness
         return True
@@ -878,18 +1440,22 @@ class City(Farmer):
     def decide_boundaries(
         self,
         seasonal_irr: float,
-    ) -> float:
-        """决定取用水资源灌溉的下界/上界。
+    ) -> Tuple[float, float]:
+        """Determine lower and upper bounds for water withdrawal.
 
-        如果该主体意向是选择了遵守制度，那么用水上限就是水资源配额。
-        如果该主体选择了违背制度，那么上限就是今年所有的灌溉量。
+        This method sets the constraints for water source optimization based
+        on the agent's decision tendency:
+            - If willing to comply ("C"): Upper bound is the minimum of quota
+              and seasonal irrigation (cannot exceed quota)
+            - If willing to defect ("D"): Upper bound is seasonal irrigation
+              (can use all needed water)
 
-        Parameters:
-            seasonal_irr:
-                本年度的灌溉量，单位：亿立方米 (1e8 m³)。
+        Args:
+            seasonal_irr: Seasonal irrigation requirement in 1e8 m³.
 
         Returns:
-            包括用水下界（0.0）和上界的元组，单位：亿立方米 (1e8 m³)。
+            Tuple of (lower_bound, upper_bound) in 1e8 m³. Lower bound is
+            always 0.0. Upper bound depends on decision tendency.
         """
         if self.willing == "C":
             ub = min(self.quota, seasonal_irr)
@@ -904,21 +1470,27 @@ class City(Farmer):
         crop_prices: Optional[dict] = None,
         **kwargs,
     ) -> Tuple[float, float]:
-        """农民开始触发一次灌溉。
-        1. 决定这次灌溉的上下界。
-        2. 利用遗传算法，根据地表/地下用水量不同带来的收益差距，估计用水的来源。
-        3. 针对最优的地表/地下用水组合，最后计算并记录当年的得分。
+        """Execute irrigation decision-making process.
 
-        Parameters:
-            seasonal_irr:
-                本年度的灌溉量。
-            water_prices:
-                水资源价格，一个字典，包括地表水和地下水的价格。
-            crop_prices:
-                作物价格，一个字典，包括作物的价格。
+        This method orchestrates the annual irrigation decision, which involves:
+            1. Determining irrigation boundaries based on decision tendency
+            2. Optimizing water source allocation (surface vs. groundwater)
+               using genetic algorithm based on payoff differences
+            3. Calculating and recording final scores for the optimal allocation
+
+        Args:
+            seasonal_irr: Seasonal irrigation requirement in 1e8 m³. If None,
+                uses `self.total_wu`.
+            water_prices: Dictionary with water prices in RMB/m³, containing
+                keys "surface" and "ground". If None, uses `self.water_prices`.
+            crop_prices: Dictionary with crop prices in RMB/t, with crop names
+                as keys. If None, uses `self.crop_prices`.
+            **kwargs: Additional arguments passed to optimization and payoff
+                calculation methods.
 
         Returns:
-            本次灌溉的地表水用量和地下水用量。
+            Tuple of (surface_water, ground_water) in 1e8 m³, representing
+            the optimal allocation for this irrigation season.
         """
         if seasonal_irr is None:
             seasonal_irr = self.total_wu
@@ -935,7 +1507,7 @@ class City(Farmer):
             crop_yield=self.dry_yield,
             **kwargs,
         )
-        # 用优化过的用水量计算收益，不进行排名，存储结果
+        # Calculate payoff with optimized water allocation, without ranking, store results
         self.calc_payoff(
             crop_yield=self.dry_yield,
             q_surface=opt_surface,
@@ -948,26 +1520,53 @@ class City(Farmer):
         return opt_surface, opt_ground
 
     def step(self) -> None:
-        """城市主体的一次行动，包含以下步骤：
+        """Execute one annual time step for the city agent.
 
-        1. 获取当年的天气数据。
-        2. 根据天气数据模拟作物的生长。
-        3. 根据作物的生长情况，计算灌溉用水量。
-        4. 根据水资源价格和作物价格，计算灌溉用水的来源。
-        5. 记录地表水和地下水的用量。
-        6. 学习表现更好的人，并有一定概率改变策略，决定下一年的策略。
-        7. 决定下一年的策略意愿。
+        This method orchestrates the city's annual decision-making cycle,
+        which includes:
+            1. **Water Allocation Optimization**: Determines optimal allocation
+               of surface water and groundwater based on economic and social
+               payoffs
+            2. **Crop Simulation**: Simulates crop growth and yield using
+               AquaCrop based on climate and irrigation
+            3. **Performance Evaluation**: Calculates and records economic
+               and social scores
+            4. **Social Learning**: Updates behavioral parameters by learning
+               from better-performing neighbors
+            5. **Strategy Mutation**: Randomly mutates strategies with small
+               probability to avoid local optima
+            6. **Decision Update**: Updates the agent's decision tendency for
+               the next year
+
+        The execution order ensures that:
+            - Water allocation is optimized before crop simulation
+            - Crop yields are available for payoff calculation
+            - Learning occurs after performance evaluation
+            - Next year's strategy is set before the time step ends
+
+        Note:
+            This method is called automatically by the model's step() method
+            for all city agents. The order of execution is randomized
+            (shuffle_do) to avoid systematic biases.
+
+        See Also:
+            - `cwatqim.agents.city.irrigating`: Water allocation optimization
+            - `cwatqim.agents.city.simulate`: Crop yield simulation
+            - `cwatqim.agents.city.change_mind`: Social learning mechanism
+            - `cwatqim.agents.city.mutate_strategy`: Strategy mutation
         """
         water_prices = self.water_prices
         crop_prices = self.crop_prices
-        # 灌溉看水从哪来
+        # Optimize water source allocation
         # total_wu is in 1e8 m^3; irrigating() returns (surface, ground) in 1e8 m^3
         sw, gw = self.irrigating(self.total_wu, water_prices, crop_prices)
         # Record volumes in 1e8 m^3 for consistency with quota
         self.surface_water = sw  # 1e8 m^3
         self.ground_water = gw  # 1e8 m^3
-        self.simulate(repeats=self.p.get("repeats", 1))  # 农作物就是需要这么多水
-        # 学习表现更好的人，并有一定概率改变策略，决定下一年的策略
+        self.simulate(
+            repeats=self.p.get("repeats", 1)
+        )  # Crops require this amount of water
+        # Learn from better performers and potentially mutate strategy for next year
         self.change_mind(metric="payoff", how="random")
         self.mutate_strategy(probability=self.p["mutation_rate"])
         self.make_decision()

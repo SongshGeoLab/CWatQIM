@@ -5,7 +5,16 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
-"""Agent classes for the model."""
+"""Agent classes for the CWatQIM model.
+
+This package contains the agent classes that represent the decision-making
+entities in the water quota allocation model:
+    - City: City-level irrigation units that make water use decisions
+    - Province: Province-level authorities that allocate water quotas
+
+All agents inherit from ABSESpy base classes and integrate with AquaCrop
+for crop simulation.
+"""
 
 from aquacrop_abses.farmer import Farmer
 
