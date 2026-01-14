@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "CWatQIM: Crop-Water Quota Irrigation Model"
+version: 0.1.1
+date-released: 2026-01-14
+doi: 10.5281/zenodo.XXXXXXX
+authors:
+  - family-names: Song
+    given-names: Shuang
+    email: songshgeo@gmail.com
+    affiliation: Peking University
+    orcid: "https://orcid.org/0000-0002-xxxx-xxxx"
+license: MIT
+repository-code: "https://github.com/SongshGeoLab/CWatQIM"
+keywords:
+  - "agent-based model"
+  - "water resources"
+  - "Yellow River"
+  - "irrigation"
+  - "water quota"
+  - "ABM"
+  - "hydrology"
+  - "multi-agent simulation"
+abstract: "An agent-based model (ABM) for simulating water quota allocation and irrigation decisions in China's Yellow River Basin. The model investigates how water quota institutions shape irrigation water withdrawal decisions and their system-wide consequences, focusing on the mechanisms through which administrative water quotas influence water source composition (surface water versus groundwater), irrigation efficiency, and crop productivity."

@@ -1,5 +1,9 @@
 # Release workflow for CWatQIM public repository
-# Handles: release-please, Zenodo archiving, PyPI publishing
+# Handles: Auto-tagging, GitHub Release creation, PyPI publishing
+#
+# NOTE: This workflow does NOT modify any files.
+# Version management is handled in the private repository.
+# This workflow only creates tags and releases when it detects a version change.
 
 name: Release
 
@@ -10,35 +14,111 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
-  release-please:
+  check-version:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
-    steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
-  # Optional: Publish to PyPI when a new release is created
-  publish-pypi:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # Required for trusted publishing
+      version: ${{ steps.get_version.outputs.version }}
+      tag_exists: ${{ steps.check_tag.outputs.exists }}
+      should_release: ${{ steps.check_tag.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          fetch-depth: 0  # Need full history for tag checking
+
+      - name: Get version from __init__.py
+        id: get_version
+        run: |
+          VERSION=$(grep -oP '__version__\s*=\s*"\K[^"]+' __init__.py)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists"
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "Tag ${TAG} does not exist, will create release"
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+  create-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.create_tag.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create and push tag
+        id: create_tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          TAG="v${VERSION}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create annotated tag
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+          echo "tag_name=${TAG}" >> $GITHUB_OUTPUT
+          echo "Created and pushed tag: ${TAG}"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+
+          # Extract the changelog section for this version
+          # Looks for ## [VERSION] and extracts until the next ## or end of file
+          CHANGELOG=$(awk -v ver="$VERSION" '
+            /^## \[/ {
+              if (found) exit
+              if (index($0, "[" ver "]")) found=1
+            }
+            found && !/^## \[/ { print }
+          ' CHANGELOG.md)
+
+          # If no changelog found, use a default message
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="Release version ${VERSION}"
+          fi
+
+          # Save to file for multi-line output
+          echo "$CHANGELOG" > /tmp/changelog.md
+          echo "Extracted changelog for version ${VERSION}"
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.create_tag.outputs.tag_name }}"
+
+          gh release create "${TAG}" \
+            --title "Release ${TAG}" \
+            --notes-file /tmp/changelog.md
+
+  publish-pypi:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -48,24 +128,24 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build
+          pip install build twine
 
       - name: Build package
         run: python -m build
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        # Uses trusted publishing - no token needed if configured in PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*
 
-  # Create GitHub Release notification for Zenodo
-  # Note: Zenodo webhook is triggered automatically when GitHub Release is created
   notify-release:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [check-version, create-release, publish-pypi]
+    if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Release notification
         run: |
-          echo "🎉 Released version ${{ needs.release-please.outputs.version }}"
-          echo "Tag: ${{ needs.release-please.outputs.tag_name }}"
-          echo "Zenodo will automatically archive this release via webhook."
+          echo "🎉 Released version ${{ needs.check-version.outputs.version }}"
+          echo "Tag: ${{ needs.create-release.outputs.tag_name }}"
+          echo "Published to PyPI successfully"
