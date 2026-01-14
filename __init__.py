@@ -7,7 +7,7 @@
 
 """Water Quota Incentive Model (CWatQIM) Package.
 
-A multi-agent model for simulating Yellow River water quota allocation and
+A agent-based model for simulating Yellow River water quota allocation and
 analyzing policy incentives. This package implements an agent-based model (ABM)
 that simulates the interactions between provinces, cities, and farmers in the
 Yellow River Basin, focusing on water quota compliance and social learning
@@ -55,4 +55,4 @@ __all__ = [
     "CWatQIModel",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.1.0"  # x-release-please-version
