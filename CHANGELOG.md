@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.1.3...v0.1.4) (2026-01-14)
+
+
+### Bug Fixes
+
+* **docs:** :memo: add DOI to CITATION.cff, pyproject.toml, and README.md for improved citation tracking ([797d02f](https://github.com/SongshGeoLab/yr-water-quota/commit/797d02fcaa409237c2a5fadca6b48fb4ea4c41af))
+
 ## [0.1.3](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.1.2...v0.1.3) (2026-01-14)
 
 
