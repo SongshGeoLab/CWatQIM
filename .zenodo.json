@@ -5,8 +5,7 @@
   "creators": [
     {
       "name": "Song, Shuang",
-      "affiliation": "Peking University",
-      "orcid": "0000-0002-xxxx-xxxx"
+      "affiliation": "Max Planck Institute of Geoanthropology"
     }
   ],
   "keywords": [
@@ -26,12 +25,6 @@
       "identifier": "comses"
     }
   ],
-  "related_identifiers": [
-    {
-      "relation": "isSupplementTo",
-      "identifier": "10.xxxx/paper",
-      "resource_type": "publication-article"
-    }
-  ],
+  "related_identifiers": [],
   "notes": "This model is developed and maintained as part of the water_quota research project. For the complete research codebase including analysis scripts, please contact the authors."
 }
