@@ -23,7 +23,7 @@ ManagerType: TypeAlias = Literal["Province", "City"]
 
 
 class CWatQIModel(MainModel):
-    """Multi-agent model for simulating Yellow River water quota allocation.
+    """agent-based model for simulating Yellow River water quota allocation.
 
     This class represents the main model that orchestrates the simulation of
     water quota allocation in the Yellow River Basin. It manages the interactions

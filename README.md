@@ -10,7 +10,7 @@ An agent-based model (ABM) for simulating water quota allocation and irrigation 
 
 ## Overview
 
-CWatQIM (Crop-Water Quota Irrigation Model) is a multi-agent model that simulates the coupled human-water system in the Yellow River Basin. The model investigates how water quota institutions shape irrigation water withdrawal decisions and their system-wide consequences, focusing on the mechanisms through which administrative water quotas influence water source composition (surface water versus groundwater), irrigation efficiency, and crop productivity.
+CWatQIM (Crop-Water Quota Irrigation Model) is a agent-based model that simulates the coupled human-water system in the Yellow River Basin. The model investigates how water quota institutions shape irrigation water withdrawal decisions and their system-wide consequences, focusing on the mechanisms through which administrative water quotas influence water source composition (surface water versus groundwater), irrigation efficiency, and crop productivity.
 
 ### Key Features
 
