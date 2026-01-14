@@ -7,12 +7,8 @@
 
 """Model package."""
 
-from ..agents import Nature
-from .exp import Experiment
-from .main import YellowRiver
+from .main import CWatQIModel
 
 __all__ = [
-    "Experiment",
-    "YellowRiver",
-    "Nature",
+    "CWatQIModel",
 ]

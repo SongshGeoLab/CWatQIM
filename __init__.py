@@ -11,16 +11,15 @@ A multi-agent model for Yellow River water quota allocation.
 This package contains the core model components and can be published independently.
 """
 
-from .agents import City, Farmer, Nature, Province
-from .model import Experiment, YellowRiver
+from .agents import City, Farmer, Province
+from .model import CWatQIModel
 
 __all__ = [
     "City",
     "Farmer",
     "Province",
-    "Nature",
     "Experiment",
-    "YellowRiver",
+    "CWatQIModel",
 ]
 
 __version__ = "0.1.0"

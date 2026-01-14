@@ -22,7 +22,7 @@ except ImportError:
 ManagerType: TypeAlias = Literal["Province", "City"]
 
 
-class YellowRiver(MainModel):
+class CWatQIModel(MainModel):
     """模拟黄河水资源分配的多主体模型。
 
     基于 ABSESpy 框架搭建。

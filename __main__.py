@@ -5,16 +5,16 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
+
 import hydra
 from abses import Experiment
 from loguru import logger
 from omegaconf import DictConfig, OmegaConf
 
-from ..agents import Nature
-from .main import YellowRiver
+from cwatqim.model.main import CWatQIModel
 
 
-@hydra.main(version_base=None, config_path="../../config", config_name="config")
+@hydra.main(version_base=None, config_path="../config", config_name="config")
 def run_abm(cfg: DictConfig | None = None) -> None:
     """批量运行一次实验。
 
@@ -23,7 +23,7 @@ def run_abm(cfg: DictConfig | None = None) -> None:
     # Disable struct mode to allow Experiment to pass additional parameters
     OmegaConf.set_struct(cfg, False)
 
-    exp = Experiment(YellowRiver, cfg=cfg, nature_cls=Nature)
+    exp = Experiment(CWatQIModel, cfg=cfg)
     exp.batch_run(
         repeats=cfg.exp.get("repeats", 1),
         parallels=cfg.exp.get("num_process", 1),

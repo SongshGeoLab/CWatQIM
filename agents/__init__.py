@@ -10,12 +10,10 @@
 from aquacrop_abses.farmer import Farmer
 
 from .city import City
-from .nature import Nature
 from .province import Province
 
 __all__ = [
     "City",
     "Farmer",
     "Province",
-    "Nature",
 ]
