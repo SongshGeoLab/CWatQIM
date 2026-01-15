@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.1.5...v0.1.6) (2026-01-15)
+
+
+### Bug Fixes
+
+* **cwatqim:** :wrench: update demo configuration and documentation for improved usability ([29db1c9](https://github.com/SongshGeoLab/yr-water-quota/commit/29db1c91ec27b54249da57c5c8413527c5f78169))
+
 ## [0.1.5](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.1.4...v0.1.5) (2026-01-14)
 
 
