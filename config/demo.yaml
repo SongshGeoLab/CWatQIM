@@ -1,0 +1,130 @@
+exp:
+  name: demo  # Experiment name
+  repeats: 1
+  note: Demo configuration for CWatQIM model with sample data.
+  num_process: 1  # Number of processes to run in parallel
+
+ds:
+  datasets: ''  # External datasets directory (not used in demo)
+  processed: 'data/sample'  # Processed data directory (relative to cwatqim root)
+
+  # ======================== Climate Data ========================
+  # City-specific climate tables (from real CMFD data)
+  city_climate_dir: 'data/sample/city_climate'
+
+  # ======================== City Data ========================
+  cities:
+    codes: 'data/sample/city_codes.xlsx'  # City code mapping table
+    shp: 'data/sample/YR_cities_sample.shp'  # City boundaries shapefile
+
+  # ======================== Crop Data ========================
+  # Water use intensity by crop (mm)
+  irr_wui: data/sample/irr_intensity.csv
+  # Irrigation area by crop (ha)
+  irr_area_ha: 'data/sample/irr_area_ha.csv'
+
+  # ======================== Province Attributes ========================
+  # Provincial water quotas (1e8 m³)
+  quotas: 'data/sample/quotas.csv'
+
+  # ======================== Price Data ========================
+  # Crop prices from China Agricultural Product Price Survey Yearbook
+  # Average prices: Rice 2.75 RMB/kg, Wheat 2.03 RMB/kg, Maize 1.85 RMB/kg
+  # Missing values: Rice (Inner Mongolia, Qinghai, Shanxi, Gansu)
+  #                 Wheat (Qinghai)
+  #                 Maize (Qinghai)
+  prices: 'data/sample/prices.csv'
+
+
+reports:
+  agents:
+    City:
+      # === Water Resources (unit: 1e8 m³) ===
+      quota: 'quota'  # Water quota allocation
+      water_used: 'total_wu'  # Total water use
+      surface: 'surface_water'  # Surface water use
+      ground: 'ground_water'  # Groundwater use
+      net_irr: 'net_irr'  # Net irrigation amount
+
+      # === Area (unit: ha) ===
+      total_area: 'total_area'  # Total irrigation area
+      area_maize: 'area_maize'  # Maize irrigation area
+      area_wheat: 'area_wheat'  # Wheat irrigation area
+      area_rice: 'area_rice'  # Rice irrigation area
+
+      # === Yield: Unit Yield (unit: t/ha) ===
+      maize: 'dry_yield_maize'  # Maize unit yield
+      wheat: 'dry_yield_wheat'  # Wheat unit yield
+      rice: 'dry_yield_rice'  # Rice unit yield
+      potential_maize: 'yield_potential_maize'  # Maize potential yield
+      potential_wheat: 'yield_potential_wheat'  # Wheat potential yield
+      potential_rice: 'yield_potential_rice'  # Rice potential yield
+
+      # === Yield: Total Production (unit: tonnes) ===
+      total_yield_maize: 'total_yield_maize'  # Total maize production
+      total_yield_wheat: 'total_yield_wheat'  # Total wheat production
+      total_yield_rice: 'total_yield_rice'  # Total rice production
+
+      # === Water Intensity Indicators (unit: m³/ha) ===
+      quota_intensity: 'quota_intensity'  # Quota per unit area
+      water_use_intensity: 'water_use_intensity'  # Water use per unit area
+
+      # === Water Ratio Indicators (dimensionless 0-1) ===
+      surface_ratio: 'surface_ratio'  # Surface water ratio
+
+      # === Other Indicators ===
+      willing: '_willing'  # Decision willingness (C/D), private attribute
+      actual_willing: 'willing'  # Actual decision willingness (C/D)
+      province: 'province_name'  # Province name
+      city: 'city_name'  # City name
+      boldness: 'boldness'  # Boldness level
+      vengefulness: 'vengefulness'  # Vengefulness level
+
+time:
+  start: '1980'
+  end: '2010'
+  years: 1
+  policy_year: 1998
+
+model:
+  l_p: 1.0
+
+Province:  # ABSESpy finds parameters by class name, so use capitalized first letter
+  names:
+    Henan: '河南'  # Henan Province
+    Neimeng: '内蒙'  # Inner Mongolia
+    Ningxia: '宁夏'  # Ningxia
+    Qinghai: '青海'  # Qinghai
+    Shandong: '山东'  # Shandong
+    Shanxi: '山西'  # Shanxi
+    Shaanxi: '陕西'  # Shaanxi
+    Gansu: '甘肃'  # Gansu
+  sw_irr_eff:
+    Qinghai: 0.41
+    Gansu: 0.49
+    Ningxia: 0.40
+    Neimeng: 0.41
+    Shaanxi: 0.83
+    Shanxi: 0.62
+    Henan: 0.46
+    Shandong: 0.50
+  gw_irr_eff:
+    Qinghai: 0.73
+    Gansu: 0.73
+    Ningxia: 0.72
+    Neimeng: 0.71
+    Shaanxi: 0.89
+    Shanxi: 0.75
+    Henan: 0.73
+    Shandong: 0.75
+
+City:  # ABSESpy finds parameters by class name, so use capitalized first letter
+  mutation_rate: 0.05
+  s_enforcement_cost: 0.26  # Grid = 1 - S-enforcement-cost
+  s_reputation: 0.55  # Group = S-reputation
+  forced_since: 2020
+  include_s_since: 1998
+  # Irrigation efficiency, input to AquaCrop model
+  irr_method: 1
+  irr_eff: 50
+  SMT: [80, 80, 80, 80]  # Soil moisture thresholds

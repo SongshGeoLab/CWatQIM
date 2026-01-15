@@ -14,7 +14,7 @@ from omegaconf import DictConfig, OmegaConf
 from cwatqim.model.main import CWatQIModel
 
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
+@hydra.main(version_base=None, config_path="config", config_name="demo")
 def run_abm(cfg: DictConfig | None = None) -> None:
     """Run batch experiments for the water quota model.
 
@@ -23,16 +23,15 @@ def run_abm(cfg: DictConfig | None = None) -> None:
     supports parallel execution of multiple simulation runs.
 
     The function will:
-        1. Load configuration from `config/config.yaml` (relative to repository root)
+        1. Load configuration from `config/demo.yaml` (relative to cwatqim package root)
         2. Create an Experiment instance with the CWatQIModel
         3. Run multiple simulation repeats (can be parallelized)
         4. Save summary statistics to CSV
 
     Note:
-        This model should be run from the repository root directory where the
-        `config/` folder is located. Configuration files are not included in
-        the PyPI package - users should clone the repository from GitHub to
-        access the full configuration.
+        This model should be run from the cwatqim package root directory where the
+        `config/` folder is located. The default configuration uses sample data
+        from `data/sample/` directory.
 
     Args:
         cfg: Optional Hydra configuration dictionary. If None, Hydra will
@@ -43,14 +42,15 @@ def run_abm(cfg: DictConfig | None = None) -> None:
             - Model parameters and data paths
 
     Example:
-        Run from command line:
+        Run from command line (from cwatqim directory):
         ```bash
         python -m cwatqim
         ```
 
-        Or with custom config:
+        Or with custom parameters:
         ```bash
         python -m cwatqim exp.repeats=10 exp.num_process=4
+        python -m cwatqim config_name=demo time.start=1985 time.end=1990
         ```
 
     Note:

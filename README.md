@@ -48,17 +48,19 @@ For citation and archival purposes, please use the Zenodo DOI.
 
 ## Quick Start
 
-After cloning the repository, run the model from the repository root:
+After cloning the repository, run the model from the `cwatqim` directory (the package root):
 
 ```bash
-# Run with default configuration
-python -m cwatqim
+cd cwatqim
+
+# Run with demo configuration (uses sample data in data/sample/)
+python -m cwatqim config_name=demo
 
 # Override configuration parameters
-python -m cwatqim exp.repeats=5 exp.num_process=4
+python -m cwatqim config_name=demo exp.repeats=5 exp.num_process=4
 
-# Use a different dataset configuration
-python -m cwatqim ds=mac
+# Override time range
+python -m cwatqim config_name=demo time.start=1985 time.end=1990
 ```
 
 ### Using Python API
@@ -67,9 +69,9 @@ python -m cwatqim ds=mac
 from cwatqim import CWatQIModel
 from hydra import compose, initialize
 
-# Initialize configuration (from config/ directory in repository)
+# Initialize configuration (from config/ directory in cwatqim package)
 with initialize(config_path="config", version_base=None):
-    cfg = compose(config_name="config")
+    cfg = compose(config_name="demo")  # Use demo configuration
 
     # Create and run model
     model = CWatQIModel(parameters=cfg)
@@ -84,15 +86,24 @@ with initialize(config_path="config", version_base=None):
 
 ## Configuration
 
-The repository includes Hydra configurations in the `config/` directory:
+The package includes a demo configuration file for quick start:
 
-- **`config/config.yaml`**: Main configuration with model parameters
-- **`config/ds/default.yaml`**: Default dataset paths (uses relative paths)
-- **`config/ds/mac.yaml`**: macOS-specific paths (for local development)
-- **`config/exp/test.yaml`**: Test experiment configuration
-- **`config/exp/exp.yaml`**: Full experiment configuration
+- **`config/demo.yaml`**: Complete demo configuration with sample data paths
 
-You can override any configuration parameter via command line arguments or create your own configuration files.
+The demo configuration uses sample data located in `data/sample/` directory, which includes:
+- City climate data (`city_climate/` directory)
+- City boundaries shapefile (`YR_cities_sample.*`)
+- City code mapping (`city_codes.xlsx`)
+- Water quotas (`quotas.csv`)
+- Irrigation data (`irr_intensity.csv`, `irr_area_ha.csv`)
+- Crop prices (`prices.csv`)
+
+All paths in `demo.yaml` are relative to the `cwatqim` package root directory. You can override any configuration parameter via command line arguments or create your own configuration files.
+
+For example, to change the simulation time range:
+```bash
+python -m cwatqim config_name=demo time.start=1985 time.end=1990
+```
 
 ## Model Components
 
