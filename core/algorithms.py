@@ -12,15 +12,10 @@ including allocation algorithms, data type conversions, and aggregation
 functions.
 """
 
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, Optional, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
-
-try:
-    from typing import TypeAlias
-except ImportError:
-    from typing_extensions import TypeAlias
 
 Number: TypeAlias = Union[float, int]
 """Type alias for numeric values."""

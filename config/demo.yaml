@@ -1,8 +1,13 @@
+defaults:
+- scenario: baseline
+- _self_
+
 exp:
   name: demo  # Experiment name
   repeats: 1
   note: Demo configuration for CWatQIM model with sample data.
   num_process: 1  # Number of processes to run in parallel
+  seed: 42  # Base random seed; null means every run draws its own (irreproducible)
 
 ds:
   datasets: ''  # External datasets directory (not used in demo)
@@ -36,7 +41,12 @@ ds:
   prices: 'data/sample/prices.csv'
 
 
-reports:
+# The top-level `tracker:` key defines ABSESpy's data reporters. The former
+# name `reports:` is deprecated upstream and only survives through an alias;
+# once that alias goes, reporters under it fail silently (see #35).
+# Not to be confused with `exp.tracker`, which selects the experiment-tracking
+# backend ('aim' or null).
+tracker:
   agents:
     City:
       # === Water Resources (unit: 1e8 m³) ===
@@ -72,9 +82,27 @@ reports:
       # === Water Ratio Indicators (dimensionless 0-1) ===
       surface_ratio: 'surface_ratio'  # Surface water ratio
 
+      # === Payoff (see issues #63, #70) ===
+      # The ODD+D protocol claims these are collected; none of them were.
+      economic_payoff: 'e'  # Economic payoff (RMB): crop revenue minus water cost
+      social_standing: 's'  # Social standing (0-1): 1 = uncriticised, see #60
+      # Both utilities are collected so the analysis can pick later; for what
+      # each means see City.relative_utility's docstring (#70)
+      aggregate_utility: 'payoff'  # the quantity agents actually maximise
+      relative_utility: 'relative_utility'  # normalised utility [0, 1], diagnostic
+      # The two below are min-max normalisations within the friend set, not
+      # ordinal ranks; the social one saturates (a tied province reports all
+      # 1.0), so never read 1.0 as "best" (#70)
+      economic_position: 'economic_position'
+      social_position: 'social_position'
+      include_s: 'include_s'  # whether the social term counted this year
+
       # === Other Indicators ===
       willing: '_willing'  # Decision willingness (C/D), private attribute
       actual_willing: 'willing'  # Actual decision willingness (C/D)
+      # A third meaning: the two above are intent, this is the outcome;
+      # see City.decision's docstring (#70)
+      decision: 'decision'  # Realised compliance (C/D)
       province: 'province_name'  # Province name
       city: 'city_name'  # City name
       boldness: 'boldness'  # Boldness level
@@ -99,6 +127,8 @@ Province:  # ABSESpy finds parameters by class name, so use capitalized first le
     Shanxi: '山西'  # Shanxi
     Shaanxi: '陕西'  # Shaanxi
     Gansu: '甘肃'  # Gansu
+  # Conveyance efficiency, the first of the two efficiency layers.
+  # See `City.calc_max_irr_seasonal` for the chain (#62).
   sw_irr_eff:
     Qinghai: 0.41
     Gansu: 0.49
@@ -122,9 +152,10 @@ City:  # ABSESpy finds parameters by class name, so use capitalized first letter
   mutation_rate: 0.05
   s_enforcement_cost: 0.26  # Grid = 1 - S-enforcement-cost
   s_reputation: 0.55  # Group = S-reputation
-  forced_since: 2020
-  include_s_since: 1998
-  # Irrigation efficiency, input to AquaCrop model
+  # forced_since / include_s_since come from the `scenario` config group (#71)
+  # AquaCrop irrigation strategy: 1 = soil moisture targets (SMT)
   irr_method: 1
+  # AquaCrop AppEff (%): field application efficiency, the second of the two
+  # efficiency layers. See `City.simulate` for how AquaCrop applies it (#62).
   irr_eff: 50
   SMT: [80, 80, 80, 80]  # Soil moisture thresholds

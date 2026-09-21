@@ -20,16 +20,9 @@ Key functions:
 
 from __future__ import annotations
 
-from functools import lru_cache
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import pandas as pd
-from pint import UnitRegistry
-
-try:
-    from typing import TypeAlias
-except ImportError:
-    from typing_extensions import TypeAlias
 
 if TYPE_CHECKING:
     from abses.core.time_driver import TimeDriver
@@ -39,47 +32,8 @@ if TYPE_CHECKING:
 WaterUnitType: TypeAlias = Literal["m3", "mm", "1e8m3"]
 """Type alias for supported water volume units."""
 
-ureg = UnitRegistry()
-"""Pint unit registry for unit conversions and validation."""
-
 CROPS = ("Rice", "Wheat", "Maize")
 """Tuple of crop names used throughout the model."""
-
-
-@lru_cache
-def load_quotas(path: str) -> pd.DataFrame:
-    """Load water quota data from CSV file with caching.
-
-    This function loads province-level water quota data from a CSV file.
-    The data is cached using LRU cache to avoid repeated file I/O operations.
-
-    Expected CSV format:
-        - Index: Years (integer)
-        - Columns: Province names (e.g., "Henan", "Shandong")
-        - Values: Water quotas in 1e8 m³ (100 million cubic meters)
-
-    Args:
-        path: File path to the CSV file containing quota data.
-
-    Returns:
-        DataFrame with years as index and provinces as columns. Values are
-        water quotas in 1e8 m³.
-
-    Note:
-        The function uses `@lru_cache` to cache the loaded data. If the file
-        changes during execution, the cache will not reflect the changes
-        unless the Python process is restarted.
-
-    Example:
-        Load quota data:
-
-        ```python
-        quotas = load_quotas("data/processed/quotas.csv")
-        # Access quota for Henan in 2000
-        henan_2000 = quotas.loc[2000, "Henan"]
-        ```
-    """
-    return pd.read_csv(path, index_col=0)
 
 
 def update_city_csv(

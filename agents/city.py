@@ -8,32 +8,59 @@
 import warnings
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypeAlias
 
-import numpy as np
 import pandas as pd
-from abses import ActorsList, PatchModule
+from abses import ActorsList
 from aquacrop import Crop, InitialWaterContent, IrrigationManagement
 from aquacrop.core import AquaCropModel
 from aquacrop.entities.soil import Soil
-from aquacrop_abses import CropCell
 from aquacrop_abses.cell import get_crop_datetime
 from aquacrop_abses.farmer import Farmer
 from aquacrop_abses.load_datasets import crop_name_to_crop
-from scipy.optimize import differential_evolution
 
-from ..core import economic_payoff, lost_reputation, update_city_csv
+from ..core import economic_payoff, social_standing, update_city_csv
+from ..core.allocation import optimize_surface_share
 from ..core.data_loaders import convert_ha_mm_to_1e8m3
 from .province import Province
-
-try:
-    from typing import TypeAlias
-except ImportError:
-    from typing_extensions import TypeAlias
 
 DecisionType: TypeAlias = Literal["D", "C"]
 
 REQUIRED_COLS = ["MinTemp", "MaxTemp", "Precipitation", "ReferenceET", "Date"]
+
+
+def validate_policy_years(forced_since: int, include_s_since: int) -> None:
+    """Reject a scenario this study does not use.
+
+    `City.willing` tests `include_s_since` before `forced_since`, so in years
+    below `include_s_since` the enforcement branch is unreachable. Whether that
+    swallows enforcement *entirely* depends on the simulation window — with the
+    1980-2010 window of this study and `include_s_since` beyond 2010, a scenario
+    asking for enforced compliance runs as "never" instead (issue #59).
+
+    The three published scenarios all satisfy `forced_since >= include_s_since`,
+    so rather than reorder the guards to support a combination nobody wants,
+    this refuses it.
+
+    Args:
+        forced_since: Year from which compliance is mandatory.
+        include_s_since: Year from which the social term enters the payoff.
+
+    Raises:
+        ValueError: If `forced_since < include_s_since`.
+    """
+    if forced_since < include_s_since:
+        raise ValueError(
+            f"City.forced_since ({forced_since}) precedes City.include_s_since "
+            f"({include_s_since}). Enforced compliance cannot begin before the "
+            "social term does: every year below include_s_since ignores "
+            "forced_since, so within this study's 1980-2010 window the run "
+            "would silently behave as the 'never' scenario. Use one of the "
+            "three scenarios this model supports: strict "
+            "(forced_since=include_s_since=1998), baseline "
+            "(forced_since=2020, include_s_since=1998), or never "
+            "(forced_since=include_s_since=2020)."
+        )
 
 
 def to_regional_crop(crop: str, province: Optional[str] = None) -> str:
@@ -120,8 +147,10 @@ class City(Farmer):
     Attributes:
         irr_area (pd.Series): Irrigated area per crop in hectares. Indexed by
             crop names ("Maize", "Wheat", "Rice").
-        irr_method (int): Irrigation method code (1-4), where higher numbers
-            typically indicate more efficient methods.
+        irr_method (int): AquaCrop irrigation strategy, taken from the
+            `irr_method` parameter (1 = soil moisture targets, the setting
+            this study uses). Not an efficiency ranking — see
+            `aquacrop_abses.farmer.Farmer.irr_methods` for the codes.
         quota (float): Water quota allocated to this city in units of
             1e8 m³ (100 million cubic meters).
         surface_water (float): Annual surface water use in 1e8 m³.
@@ -226,32 +255,6 @@ class City(Farmer):
             return self.yield_potential.get(crop_name)
         return super().__getattr__(name)
 
-    @property
-    def climate_datapath(self) -> Path:
-        """Get the file path to this city's climate data.
-
-        The climate data file is expected to be named `climate_C{city_id}.csv`
-        and located in the directory specified by `self.ds.city_climate_dir`.
-
-        Returns:
-            Path object pointing to the climate data CSV file.
-
-        Raises:
-            AssertionError: If the climate data file does not exist. This
-                typically indicates a configuration error or missing data file.
-
-        Note:
-            The file should contain daily climate data with columns:
-            - Date: Date in datetime format
-            - MinTemp: Minimum temperature (°C)
-            - MaxTemp: Maximum temperature (°C)
-            - Precipitation: Daily precipitation (mm)
-            - ReferenceET: Reference evapotranspiration (mm)
-        """
-        dp = Path(self.ds.city_climate_dir) / f"climate_C{self.city_id}.csv"
-        assert dp.exists(), f"Climate data file not found: {dp}"
-        return dp
-
     @cached_property
     def climate_data(self) -> pd.DataFrame:
         """Load and cache daily climate data for this city.
@@ -283,8 +286,6 @@ class City(Farmer):
             only once, even if accessed multiple times. This avoids loading
             during setup when City_ID may not yet be assigned.
         """
-        from pathlib import Path
-
         if not hasattr(self.ds, "city_climate_dir"):
             raise ValueError(
                 "City climate directory not configured. Please add 'city_climate_dir' to ds."
@@ -394,15 +395,91 @@ class City(Farmer):
         return (self.total_wu * 1e8) / self.total_area
 
     @property
+    def total_withdrawal(self) -> float:
+        """Surface water plus groundwater withdrawn this year, in 1e8 m³.
+
+        The single definition of "how much was withdrawn", and therefore the
+        single place that decides when the surface/groundwater *share* is
+        undefined. Both `surface_ratio` and `calc_max_irr_seasonal` divide by
+        it, and each answers the zero case in its own terms (see issue #66).
+        """
+        return self.surface_water + self.ground_water
+
+    @property
     def surface_ratio(self) -> float:
         """Surface water ratio (0-1). For data collection.
 
-        Calculated as: surface_water / (surface_water + ground_water)
+        Calculated as: surface_water / total_withdrawal. Withdrawing nothing
+        leaves the ratio undefined; 0.0 is reported as the display default.
         """
-        total = self.surface_water + self.ground_water
-        if total == 0:
+        if self.total_withdrawal <= 0:
             return 0.0
-        return self.surface_water / total
+        return self.surface_water / self.total_withdrawal
+
+    @property
+    def economic_position(self) -> float:
+        """Where this year's economic payoff sits among friends, in [0, 1].
+
+        A **min-max normalisation** within the friend set, not a rank: see
+        `compare`. Purely diagnostic — no decision rule reads it.
+
+        Reads only recorded state, so collecting it cannot disturb either
+        random stream.
+        """
+        return self.compare("e")
+
+    @property
+    def social_position(self) -> float:
+        """Where this year's social standing sits among friends, in [0, 1].
+
+        Same min-max caveat as `economic_position`, plus a sharper one: it
+        saturates. `social_standing` is 1.0 whenever nobody criticised and
+        nobody was criticised, so under enforced compliance a whole province
+        can share the maximum and every city then reports 1.0. Read a value
+        of 1.0 as "not below anyone here", never as "best" (see issue #70).
+        """
+        return self.compare("s")
+
+    @property
+    def relative_utility(self) -> float:
+        """Utility recomputed from the two positions, in [0, 1]. Diagnostic.
+
+        Collected alongside — not instead of — `payoff`, because the two are
+        different quantities (see issue #70):
+
+        - `payoff` is what agents actually maximise and learn from: the
+          **raw** product, in the units of `e` (RMB). Every call site leaves
+          `rank` at False, so this is the only utility in the dynamics.
+        - This one normalises both components against the friend set first,
+          giving a bounded number that is comparable across prefectures and
+          years.
+
+        Note:
+            The ODD+D protocol calls its utility
+            $U=\\tilde{c}_e\\cdot\\tilde{c}_s$ and describes agents as ranked
+            "collectively". Neither matches the implementation: nothing in the
+            model ranks anything (`agg_payoff(rank=True)` had no caller before
+            this property), the normalisation is min-max rather than ordinal,
+            and it runs over the friend set rather than the whole basin. This
+            column is therefore a post-hoc diagnostic, **not** a faithful
+            rendering of the protocol's $U$ — the protocol is what needs
+            correcting, and collecting a column does not do that.
+
+            Because collection happens after every city has stepped, the
+            comparison set here is a clean same-year snapshot; the objective
+            function, had it ever ranked, would have seen a torn one (cities
+            step in shuffled order).
+
+        Both terms follow `include_s`, so this column changes meaning at
+        `include_s_since` — collect `include_s` alongside it.
+        """
+        return self.agg_payoff(
+            e=self.e,
+            s=self.s,
+            rank=True,
+            include_s=self.include_s,
+            record=False,
+        )
 
     @property
     def crop_here(self) -> List[str]:
@@ -427,7 +504,7 @@ class City(Farmer):
             When multiplied by a water depth in mm, use the conversion:
             ha * mm -> m^3 via factor 10 (1 ha = 10,000 m^2; 1 mm = 0.001 m).
         """
-        return self.dynamic_var("irr_area")
+        return self.yearly_dynamic("irr_area")
 
     @property
     def total_area(self) -> float:
@@ -530,7 +607,7 @@ class City(Farmer):
             application. This data comes from statistics rather than model
             simulation.
         """
-        return self.dynamic_var("wui")
+        return self.yearly_dynamic("wui")
 
     @property
     def quota(self) -> float:
@@ -577,9 +654,22 @@ class City(Farmer):
             Units: Both surface_water and quota are in 1e8 m³ (100 million
             cubic meters) for consistent comparison.
         """
-        if self.surface_water > self.quota:
-            return "D"
-        return "C"
+        return self.decide(self.surface_water)
+
+    def decide(self, q_surface: float) -> DecisionType:
+        """Whether a given surface-water use counts as a breach.
+
+        The single definition of "over quota". `decision` applies it to what
+        was actually withdrawn; `calc_social_standing` applies it to the
+        candidate under evaluation. Same rule, one place (see issue #72).
+
+        Args:
+            q_surface: Surface water use in 1e8 m³, actual or candidate.
+
+        Returns:
+            "D" when it exceeds the quota, "C" otherwise.
+        """
+        return "D" if q_surface > self.quota else "C"
 
     @property
     def water_prices(self) -> Dict[str, float]:
@@ -606,13 +696,24 @@ class City(Farmer):
     def include_s(self) -> bool:
         """Check whether social factors should be included in payoff calculation.
 
+        The threshold is the same `include_s_since` parameter that gates
+        `willing`, so both paths share one policy year: before it, agents
+        neither form social decisions nor carry the social term in their
+        payoff.
+
         Returns:
-            True if social factors should be included, False otherwise.
-            Currently always returns True, but can be configured based on
-            simulation year if needed.
+            True from `include_s_since` onwards, False before it.
+
+        Raises:
+            KeyError: If `include_s_since` is missing from the parameters.
+
+        See Also:
+            - `cwatqim.agents.city.City.willing`: The other consumer of
+              `include_s_since`
+            - `cwatqim.agents.city.City.agg_payoff`: Where the flag switches
+              `payoff = e * s` to `payoff = e`
         """
-        # return self.time.year >= self.p.include_s_since
-        return True
+        return self.time.year >= self.p["include_s_since"]
 
     def setup(self) -> None:
         """Initialize the city agent with dynamic variables and attributes.
@@ -644,6 +745,8 @@ class City(Farmer):
             - `cwatqim.core.data_loaders.update_city_csv`: Function for updating
                 city data from CSV files
         """
+        # 每个城市每年只读一次 dynamic variable（见 #68）
+        self._dynamic_cache: Dict[Tuple[str, int, Optional[int]], Any] = {}
         self.add_dynamic_variable(
             name="wui",
             data=pd.read_csv(self.ds.irr_wui),
@@ -654,8 +757,6 @@ class City(Farmer):
             data=pd.read_csv(self.ds.irr_area_ha, index_col=0),
             function=update_city_csv,
         )
-        # ===== Farm-related attributes =====
-        self.irr_method = 4
         # ===== Water-related attributes =====
         self._quota = 0.0
         self.surface_water = 0.0
@@ -664,51 +765,136 @@ class City(Farmer):
         self.boldness = self.random.random()
         self.vengefulness = self.random.random()
         self.willing = self.make_decision()
+        # 本年度的同侪判定随机数，`step` 开头刷新（见 #61）
+        self._judgements: Dict[int, Tuple[float, float]] = {}
         # ===== Score-related attributes =====
         # income: -inf~inf
         # social benefits: 0~1
         self.agg_payoff(e=0.0, s=1.0, record=True, rank=False, include_s=self.include_s)
 
+    def yearly_dynamic(self, name: str) -> Any:
+        """Read a dynamic variable, at most once per model year per city.
+
+        ABSESpy's `dynamic_var` looks like it caches, but the cache never
+        hits, and the reason matters: its key is `time.tick`, which resolves
+        to `model.steps` — mesa's step counter, not model time — while every
+        update function here filters on `time.year`. Nothing appends to
+        `_updated_ticks` either, so each read re-runs the update function:
+        `inspect.getsource` on it (~200 us), then a full-table mask and copy
+        (~285 us). Measured at ~526 us per read (see issue #68).
+
+        That cost lands in two bad places: `calc_max_irr_seasonal` reads
+        `wui` once per crop per year, and `calc_payoff` reads `irr_area`
+        inside the differential-evolution objective — where it was 90% of
+        every candidate evaluation.
+
+        The key is `(name, year, city_id)` — the full set of inputs
+        `update_city_csv` reads. Two of those three are load-bearing:
+
+        - **year**, not tick: `tick` is `model.steps`, so anything that moves
+          time outside `step()` (`tests.helper.time_to`, a warm-up, a direct
+          `time.to()`) desynchronises them permanently and freezes every city
+          on one year's data.
+        - **city_id**: `update_city_csv` returns all zeros when it is None
+          (`data_loaders.py`), which happens before the shapefile attributes
+          are assigned. Without it in the key, one early read would pin a city
+          to zeros for the whole year — a silent-zeros failure, the worst kind
+          here.
+
+        Note:
+            `Province` deliberately does not use this: it reads its one
+            dynamic variable once per year already (`update_data`), so a cache
+            would buy ~36 ms per run and cost a second copy of this logic.
+
+            Only correct for variables that vary by year. A monthly variable
+            would need `time.dt` in the key.
+
+            The cached object is shared by readers of the same city-year.
+            Nothing in this model mutates these Series in place — they are
+            only read, or combined into new Series — but an in-place edit
+            would now be visible to the other readers.
+
+        Args:
+            name: Dynamic variable name, as registered in `setup`.
+
+        Returns:
+            The variable's value for the current year.
+        """
+        key = (name, self.time.year, self.city_id)
+        if key not in self._dynamic_cache:
+            self._dynamic_cache[key] = self.dynamic_var(name)
+        return self._dynamic_cache[key]
+
     def calc_max_irr_seasonal(self, crop: str) -> float:
-        """Calculate maximum seasonal irrigation depth for a crop.
+        """Seasonal cap on irrigation reaching the field, in mm.
 
-        This method calculates the maximum irrigation depth (in mm) that can
-        be applied to a crop, accounting for:
-            - The crop's water use intensity (WUI)
-            - The proportion of surface water vs. groundwater
-            - Irrigation efficiency for each water source
+        **This is the first of the model's two efficiency layers.** Water
+        travels from the source to the crop root zone through two losses,
+        applied at different places and by different parameters:
 
-        The calculation weights the WUI by the surface/groundwater ratio
-        and their respective irrigation efficiencies. This accounts for the
-        fact that different water sources have different application
-        efficiencies.
+        1. **Conveyance** (here): `wui` is the gross withdrawal per hectare
+           taken at the source, from irrigation statistics. Weighting it by
+           the provincial coefficients `sw_irr_eff` / `gw_irr_eff` (the
+           渠系水利用系数, 0.40-0.89 depending on province and source) gives
+           the depth that survives the canal network and arrives at the field.
+           That is what this method returns, and what `simulate` hands to
+           AquaCrop as `MaxIrrSeason` — a cap on *cumulative applied*
+           irrigation.
+        2. **Field application**: AquaCrop then applies `AppEff`
+           (the `irr_eff` parameter) to each irrigation event; see `simulate`.
+
+        The two layers compose rather than duplicate: water delivered to the
+        root zone is roughly `wui * conveyance_eff * AppEff/100`. Reporting
+        only one of them understates the losses (see issue #62).
+
+        Because the surface/groundwater mix sets the weighting, the cap — and
+        with it the season's water-limited yield — moves with the source
+        portfolio. Groundwater has the higher coefficient in every province,
+        so substituting groundwater raises the delivered depth for the same
+        gross withdrawal. That is the mechanism behind the efficiency results,
+        and the reason the coefficients deserve a sensitivity analysis
+        (see issue #64).
 
         Args:
             crop: Crop name ("Maize", "Wheat", or "Rice") for which to
                 calculate maximum irrigation.
 
         Returns:
-            Maximum seasonal irrigation depth in millimeters (mm). This value
-            is used by AquaCrop to constrain irrigation applications.
+            Maximum seasonal irrigation depth in millimeters (mm), measured at
+            the field boundary — i.e. after conveyance losses, before field
+            application losses.
 
         Formula:
             max_irr = WUI * (sw_ratio * sw_eff + gw_ratio * gw_eff)
 
             Where:
-            - WUI: Water use intensity for the crop (mm)
+            - WUI: Gross withdrawal per hectare for the crop (mm)
             - sw_ratio: Surface water proportion
             - gw_ratio: Groundwater proportion
-            - sw_eff: Surface water irrigation efficiency
-            - gw_eff: Groundwater irrigation efficiency
+            - sw_eff: Surface water conveyance efficiency (province)
+            - gw_eff: Groundwater conveyance efficiency (province)
 
         Note:
-            If both surface_water and ground_water are zero, the calculation
-            will result in NaN. This should be handled by the calling code.
+            Withdrawing nothing means irrigating nothing: with
+            `total_withdrawal` at zero the share is undefined, and this returns
+            0.0 mm so that AquaCrop runs the season rainfed — a value in its
+            vocabulary, not a sentinel. Dividing by the zero total instead
+            produced a NaN `MaxIrrSeason`, which then tripped the equality
+            assertion in `simulate` (`NaN != NaN`) rather than reaching
+            AquaCrop (see issue #66).
+
+            The guard comes before reading `wui`: the year's first read still
+            goes through a full-table scan (see `yearly_dynamic` and issue
+            #68), and on this path it would be wasted.
         """
-        wui = self.wui[crop]
-        sw = self.surface_water / (self.surface_water + self.ground_water)
-        gw = self.ground_water / (self.surface_water + self.ground_water)
-        return wui * sw * self.province.sw_irr_eff + wui * gw * self.province.gw_irr_eff
+        total = self.total_withdrawal
+        if total <= 0:
+            return 0.0
+        sw_share = self.surface_water / total
+        gw_share = self.ground_water / total
+        return self.wui[crop] * (
+            sw_share * self.province.sw_irr_eff + gw_share * self.province.gw_irr_eff
+        )
 
     def simulate(self, crop: Optional[Crop] = None, repeats: int = 1) -> pd.DataFrame:
         """Simulate crop growth and yield for one growing season.
@@ -747,6 +933,30 @@ class City(Farmer):
             type is automatically regionalized (e.g., "Wheat" -> "RegionalWheat"
             for winter wheat regions) based on the province location.
 
+        Irrigation efficiency:
+            **This is the second of the model's two efficiency layers** — the
+            field application one. `calc_max_irr_seasonal` has already taken
+            conveyance losses out; `AppEff` (the `irr_eff` parameter, 50)
+            handles what is lost between applying water to the field and it
+            entering the root zone. AquaCrop uses it twice, and the two uses
+            are *not* inverses of each other:
+
+            - when deciding how much to apply, it inflates the request,
+              `IrrReq *= ((100 - AppEff) + 100) / 100` — so `AppEff=50` asks
+              for 1.5x the root-zone deficit
+              (`aquacrop/solution/irrigation.py:173`);
+            - when infiltrating, it keeps `Irr * AppEff / 100` — so half of
+              what was applied actually reaches the soil
+              (`aquacrop/solution/infiltration.py:98`).
+
+            `MaxIrrSeason` caps the *applied* (pre-infiltration) total, so the
+            two layers compose: root-zone water is about
+            `wui * conveyance_eff * AppEff/100` (see issue #62).
+
+            Note that AquaCrop's inflation factor is not `100/AppEff`: at
+            `AppEff=50` it requests 1.5x rather than 2x, so a deficit is not
+            fully closed even when the seasonal cap is slack.
+
         Raises:
             FileNotFoundError: If climate data file is missing.
             ValueError: If crop name is invalid or crop has no irrigated area.
@@ -754,6 +964,7 @@ class City(Farmer):
         See Also:
             - `aquacrop.core.AquaCropModel`: The underlying crop simulation model
             - `cwatqim.agents.city.to_regional_crop`: Function for regionalizing crops
+            - `cwatqim.agents.city.City.calc_max_irr_seasonal`: Conveyance layer
         """
         if crop is None:
             # Simulate all crops in this area
@@ -774,13 +985,14 @@ class City(Farmer):
         crop_obj = crop_name_to_crop(crop_name, regionalized=regionalize)
         start_dt, end_dt = get_crop_datetime(crop=crop_obj, year=self.time.year)
 
+        # 这里原本还有一句 `assert irr_strategy.MaxIrrSeason == calc_max_irr_seasonal(crop)`：
+        # 纯函数与自己比，恒真，只是把 `wui` 的整表扫描又付了一遍（见 #66、#68）。
         irr_strategy = IrrigationManagement(
-            irrigation_method=self.p.irr_method,
+            irrigation_method=self.irr_method,
             SMT=self.p.SMT,
             AppEff=self.p.irr_eff,
             MaxIrrSeason=self.calc_max_irr_seasonal(crop),
         )
-        assert irr_strategy.MaxIrrSeason == self.calc_max_irr_seasonal(crop)
         ac_model = AquaCropModel(
             sim_start_time=start_dt.strftime("%Y/%m/%d"),
             sim_end_time=end_dt.strftime("%Y/%m/%d"),
@@ -810,7 +1022,7 @@ class City(Farmer):
             - Crop yields (which depend on total irrigation)
             - Water prices (different for surface and groundwater)
             - Crop prices
-            - Social costs (if included in the payoff function)
+            - Social standing retained (if the payoff includes it)
 
         The optimization problem is:
             maximize: payoff(crop_yield, q_surface, q_ground, ...)
@@ -835,7 +1047,10 @@ class City(Farmer):
                 - popsize: Population size multiplier (default: 15)
                 - maxiter: Maximum iterations (default: 100)
                 - polish: Use L-BFGS-B to polish solution (default: True)
-                - seed: Random seed (default: None)
+                - seed / rng: Source of randomness. Defaults to the model's
+                  numpy generator (`self.rng`), so that a fixed model seed
+                  yields reproducible allocations. Pass an int here to pin
+                  a single call instead.
             **kwargs: Additional arguments passed to the payoff function.
                 Required if ufunc is None:
                 - water_prices: Dict with "surface" and "ground" keys (RMB/m³)
@@ -878,13 +1093,6 @@ class City(Farmer):
         if total_irrigation == 0.0:
             warnings.warn(f"Zero irr volume for {self.unique_id}.")
             return 0.0, 0.0
-        if surface_boundaries is None:
-            surface_boundaries = (0.0, total_irrigation)
-        surface_lb, surface_ub = surface_boundaries
-        if surface_lb < 0.0 or max(surface_lb, surface_ub) > total_irrigation:
-            raise ValueError(f"Invalid boundary values: {surface_boundaries}.")
-        if ga_kwargs is None:
-            ga_kwargs = {}
         if ufunc is None:
             if "water_prices" not in kwargs:
                 raise ValueError(
@@ -895,62 +1103,18 @@ class City(Farmer):
         if isinstance(crop_yield, str):
             crop_yield = getattr(self, crop_yield)
 
-        def fitness(q_surface: np.ndarray) -> float:
-            """Objective function for optimization.
-
-            Note: We negate the result because differential_evolution minimizes,
-            but we want to maximize the payoff.
-            """
-            q_surface_val = (
-                q_surface[0] if isinstance(q_surface, np.ndarray) else q_surface
-            )
-            q_ground = total_irrigation - q_surface_val
-            kwargs.update(
-                {
-                    "crop_yield": crop_yield,
-                    "q_surface": q_surface_val,
-                    "q_ground": q_ground,
-                }
-            )
-            return -ufunc(**kwargs)
-
-        # Use differential_evolution for optimization
-        # Merge default parameters with user-provided ga_kwargs
-        de_params = {
-            "popsize": 15,  # Population size multiplier
-            "maxiter": 100,  # Maximum iterations
-            "polish": True,  # Use L-BFGS-B to polish final solution
-            "seed": None,  # Use model's random state if needed
-        }
-        de_params.update(ga_kwargs)
-
-        result = differential_evolution(
-            func=fitness,
-            bounds=[(surface_lb, surface_ub)],
-            **de_params,
+        # 求解本身不依赖智能体，放在 `core.allocation` 里（见 issue #27）。
+        # 这里只负责把 City 的状态翻成它要的参数：默认灌溉量、默认收益函数、
+        # 作物单产，以及模型自己的随机数发生器（见 issue #18）。
+        return optimize_surface_share(
+            ufunc,
+            total_irrigation,
+            surface_boundaries,
+            rng=self.rng,
+            ga_kwargs=ga_kwargs,
+            crop_yield=crop_yield,
+            **kwargs,
         )
-
-        q_surface_opt = result.x[0]
-        q_ground_opt = total_irrigation - q_surface_opt
-        return q_surface_opt, q_ground_opt
-
-    def get_cells(
-        self,
-        layer: Optional[PatchModule] = None,
-    ) -> ActorsList[CropCell]:
-        """Get all land cells (patches) within this city's geometry.
-
-        Args:
-            layer: The patch layer to select from. If None, uses the model's
-                major layer (typically the main spatial layer).
-
-        Returns:
-            ActorsList of CropCell objects representing land patches within
-            the city's boundary.
-        """
-        if layer is None:
-            layer = self.model.nature.major_layer
-        return layer.select(self.geometry)
 
     @property
     def friends(self) -> ActorsList[Farmer]:
@@ -964,8 +1128,16 @@ class City(Farmer):
 
         Returns:
             ActorsList of City agents that are linked to this agent through
-            the "friend" relationship. These are the agents whose behavior
-            and performance this agent can observe and learn from.
+            the "friend" relationship, in link creation order. These are the
+            agents whose behavior and performance this agent can observe and
+            learn from.
+
+        Note:
+            The order matters for reproducibility, because `judge_friends`
+            draws from the shared model RNG once per friend. ABSESpy guarantees
+            a stable order only since v0.11.7 — before that the link store
+            returned an unordered `set` — hence the version floor in
+            `pyproject.toml`.
         """
         return self.link.get("friend", default=True)
 
@@ -990,6 +1162,13 @@ class City(Farmer):
             - Between these years: Returns the agent's internal `_willing`
               value (behavioral tendency)
 
+        The first branch shadows the second whenever
+        `forced_since < include_s_since`, which would silently turn a
+        "strict enforcement" scenario into a "never" one. Rather than reorder
+        the guards, `setup` rejects that combination outright — the study
+        does not use it, so the honest answer is to refuse it rather than to
+        quietly simulate something else (see issue #59).
+
         Note:
             This property models the historical policy change in the Yellow
             River Basin, where mandatory water allocation policies were
@@ -997,10 +1176,16 @@ class City(Farmer):
 
         Returns:
             Decision tendency: "C" for compliance or "D" for defect.
+
+        Raises:
+            KeyError: If `include_s_since` or `forced_since` is missing from
+                the `City` parameters. Both gate the policy timeline, so a
+                missing key is a configuration error rather than something to
+                paper over with a default.
         """
-        if self.time.year < self.p.get("include_s_since"):
+        if self.time.year < self.p["include_s_since"]:
             return "D"
-        if self.time.year >= self.p.get("forced_since"):
+        if self.time.year >= self.p["forced_since"]:
             return "C"
         return self._willing
 
@@ -1043,72 +1228,83 @@ class City(Farmer):
             return 1.0
         return (my - min_val) / (max_val - min_val)
 
-    def calc_social_costs(
+    def calc_social_standing(
         self,
         q_surface: float,
+        standing: Optional[Dict[DecisionType, float]] = None,
     ) -> float:
-        """Calculate social costs based on rule compliance and peer behavior.
+        """Social standing this agent would retain under a given withdrawal.
 
-        This method implements a social cost function that captures two
-        mechanisms:
-            1. **Reputation Loss**: Cost from being criticized by neighbors
-               when violating rules
-            2. **Social Discontent**: Cost from observing neighbors violate
-               rules while oneself complies
+        Turns a candidate `q_surface` into a compliance decision, asks
+        `judge_friends` who criticised whom, and hands the two counts to
+        `social_standing` — see that function for the returned multiplier and,
+        importantly, its direction (issue #60).
 
-        The social cost is calculated using a Cobb-Douglas function, which
-        creates a non-linear relationship between violations and costs. The
-        cost depends not only on the agent's own behavior but also on the
-        behavior of neighbors in the social network.
-
-        Key mechanisms:
-            - If an agent violates rules (q_surface > quota) when neighbors
-              comply, they face high reputation loss
-            - If an agent complies when neighbors violate, they experience
-              social discontent (feeling of unfairness)
-            - If both agent and neighbors violate, social costs are lower
-              (violation becomes normalized)
-
-        The calculation uses parameters:
-            - `s_enforcement_cost`: Weight for social discontent (default: 0.5)
-            - `s_reputation`: Weight for reputation loss (default: 0.5)
+        Reads `s_enforcement_cost` and `s_reputation` from `self.p`, both
+        defaulting to 0.5. Peer evaluation follows multi-cultural theory
+        [@castillarho2017a].
 
         Args:
             q_surface: Surface water use in units of 1e8 m³ (100 million m³).
-                This value is compared with `self.quota` to determine if
-                the agent is violating rules.
+                Compared with `self.quota` to decide whether this candidate
+                withdrawal counts as a violation.
+            standing: Precomputed `{"C": ..., "D": ...}` from
+                `standing_by_decision`. The optimizer passes it so the two
+                values are computed once per year instead of once per
+                candidate evaluation (see issue #72).
 
         Returns:
-            Social cost value in the range [0, 1], where:
-                - 0.0: No social cost (best case)
-                - 1.0: Maximum social cost (worst case)
-            The value is the equal-weighted average of enforcement cost and
-            reputation loss.
+            Retained social standing in range [0, 1], passed straight to
+            `agg_payoff` as the `s` factor.
 
         Note:
-            The social cost calculation is based on multi-cultural theory
-            and peer evaluation mechanisms. The Cobb-Douglas function ensures
-            that costs increase non-linearly with the number of violations
-            observed or committed.
+            This method was called `calc_social_costs`, which named the
+            complement of what it returns (see issue #60).
 
         See Also:
-            - `cwatqim.core.payoff.lost_reputation`: Function calculating
-                reputation loss using Cobb-Douglas
-            - `cwatqim.agents.city.judge_friends`: Method for evaluating
+            - `cwatqim.core.payoff.social_standing`: The underlying function
+            - `cwatqim.agents.city.City.judge_friends`: Method for evaluating
                 neighbor behavior
         """
-        # Compare potential surface water use with quota to determine violation
-        # Both q_surface and self.quota are in 1e8 m³
-        willing: DecisionType = "D" if q_surface > self.quota else "C"
-        dislikes, criticized = self.judge_friends(willing=willing)
+        if standing is None:
+            standing = self.standing_by_decision()
+        return standing[self.decide(q_surface)]
+
+    def standing_by_decision(self) -> Dict[DecisionType, float]:
+        """This year's social standing under each of the two decisions.
+
+        The social term depends on the candidate allocation only through
+        whether it breaches the quota, so over the whole feasible domain it
+        takes **two** values — it is a step function at the quota, not a
+        continuous one. Computing it here, once, instead of inside every
+        differential-evolution objective evaluation is therefore exact rather
+        than approximate (see issue #72).
+
+        Measured: 7 cities over 20 years called the social term 18,962 times;
+        this reduces that to 2 per agent-year.
+
+        Returns:
+            Mapping from decision ("C" / "D") to the standing retained.
+
+        Note:
+            One of the two is often irrelevant: when `willing` is "C",
+            `decide_boundaries` caps the upper bound at the quota, so every
+            candidate is compliant and the social term is a positive constant
+            — which cannot move the argmax at all. It is still computed here
+            because `irrigating` records the realised payoff afterwards.
+        """
         s_enforcement_cost = self.p.get("s_enforcement_cost", 0.5)
         s_reputation = self.p.get("s_reputation", 0.5)
-        return lost_reputation(
-            s_enforcement_cost,
-            s_reputation,
-            criticized,
-            dislikes,
-        )
+        standing: Dict[DecisionType, float] = {}
+        for willing in self.valid_decisions:
+            dislikes, criticized = self.judge_friends(willing=willing)
+            standing[willing] = social_standing(
+                s_enforcement_cost,
+                s_reputation,
+                criticized,
+                dislikes,
+            )
+        return standing
 
     def calc_payoff(
         self,
@@ -1117,7 +1313,9 @@ class City(Farmer):
         q_ground: float,
         water_prices: Optional[dict] = None,
         crop_prices: Optional[dict] = None,
-        **kwargs,
+        standing: Optional[Dict[DecisionType, float]] = None,
+        record: bool = False,
+        rank: bool = False,
     ) -> float:
         """Calculate combined economic and social payoff.
 
@@ -1133,7 +1331,7 @@ class City(Farmer):
 
         The economic score is calculated using `economic_payoff`, which
         considers crop revenue and water costs. The social score is calculated
-        using `calc_social_costs`, which considers rule compliance and peer
+        using `calc_social_standing`, which considers rule compliance and peer
         behavior.
 
         Args:
@@ -1164,9 +1362,14 @@ class City(Farmer):
 
         See Also:
             - `cwatqim.core.payoff.economic_payoff`: Economic benefit calculation
-            - `cwatqim.agents.city.calc_social_costs`: Social cost calculation
+            - `cwatqim.agents.city.City.calc_social_standing`: Retained
+                social standing
             - `cwatqim.agents.city.agg_payoff`: Payoff aggregation method
         """
+        if water_prices is None:
+            water_prices = self.water_prices
+        if crop_prices is None:
+            crop_prices = self.crop_prices
         e = economic_payoff(
             q_surface=q_surface,
             q_ground=q_ground,
@@ -1176,8 +1379,16 @@ class City(Farmer):
             area=self.irr_area,
             unit="1e8m3",
         )
-        s = self.calc_social_costs(q_surface=q_surface)
-        return self.agg_payoff(e=e, s=s, include_s=self.include_s, **kwargs)
+        # 政策年之前 `agg_payoff` 会丢掉 s，没必要先算出来再扔——除非这一次
+        # 调用要记录它（`record=True` 会把 s 写进主体、进而被采集）。短路只
+        # 发生在优化循环里，落盘的值一个不差（见 issue #72）。
+        if self.include_s or record:
+            s = self.calc_social_standing(q_surface=q_surface, standing=standing)
+        else:
+            s = 1.0
+        return self.agg_payoff(
+            e=e, s=s, include_s=self.include_s, record=record, rank=rank
+        )
 
     def agg_payoff(
         self,
@@ -1224,14 +1435,17 @@ class City(Farmer):
                 - Absolute mode without social: [0, inf) (same as e)
 
         Example:
-            Calculate payoff during optimization (with ranking):
+            Rank against friends, which is what `ranked_utility` collects.
+            Note that the optimizer does **not** rank — `irrigating` goes
+            through `calc_payoff`, which leaves `rank` at its default of
+            False, so agents maximise the raw product (see issue #70):
 
             ```python
-            payoff = city.agg_payoff(
-                e=economic_score,
-                s=social_score,
+            utility = city.agg_payoff(
+                e=city.e,
+                s=city.s,
                 rank=True,  # Compare relative to friends
-                record=False  # Don't store during optimization
+                record=False,  # Collecting must not mutate the agent
             )
             ```
 
@@ -1304,7 +1518,30 @@ class City(Farmer):
         else:
             self.vengefulness = self.random.random()
 
-    def hate_a_behave(self, behave: DecisionType) -> bool:
+    def draw_judgements(self) -> None:
+        """Draw this year's peer-judgement variates, once.
+
+        Each `(self, friend)` pair needs two uniform draws: one for whether
+        this agent criticises that friend, one for whether that friend
+        criticises this agent.
+
+        Drawing them once per year is what keeps `calc_social_standing` a
+        deterministic function of the candidate allocation. It runs inside the
+        differential-evolution objective, and drawing per call made the same
+        candidate score differently on each evaluation — precisely what
+        `differential_evolution` assumes cannot happen (issue #61).
+
+        Redrawn at the start of every `step`, so judgement is still stochastic
+        across years; it is frozen only *within* one year's optimization.
+        """
+        self._judgements = {
+            # 两个数都从模型那条共享随机流里抽（`friend.random` 与
+            # `self.random` 本就是同一个对象），顺序由 `friends` 定
+            friend.unique_id: (self.random.random(), self.random.random())
+            for friend in self.friends
+        }
+
+    def hate_a_behave(self, behave: DecisionType, draw: float) -> bool:
         """Determine whether to dislike a behavior, generating social discontent.
 
         This method implements the judgment mechanism for evaluating others'
@@ -1318,10 +1555,16 @@ class City(Farmer):
 
         Args:
             behave: The other agent's decision behavior ("C" or "D").
+            draw: This year's uniform variate for the judging pair, from
+                `draw_judgements`.
 
         Returns:
             True if the agent dislikes the behavior (will generate social
             discontent), False otherwise.
+
+        Note:
+            The variate is passed in, not drawn here — see `draw_judgements`
+            (issue #61).
         """
         # If agent itself is violating rules, has no authority to criticize
         if self.decision == "D":
@@ -1330,10 +1573,10 @@ class City(Farmer):
         if behave == "C":
             return False
         # If other agent is violating, may criticize based on vengefulness
-        return self.random.random() <= self.vengefulness
+        return draw <= self.vengefulness
 
     def judge_friends(self, willing: DecisionType) -> Tuple[int, int]:
-        """Evaluate friends' behavior and calculate social costs.
+        """Count who criticises whom, the input to the social term.
 
         This method implements peer evaluation based on multi-cultural theory,
         inspired by research published in Nature Human Behavior [@castillarho2017a].
@@ -1344,8 +1587,8 @@ class City(Farmer):
               complies, it experiences social discontent (feeling of unfairness)
             - If an agent's vengefulness is high, it will strongly dislike
               rule-violating friends, reducing both agents' social satisfaction
-            - This creates a feedback mechanism where social costs depend on
-              both own and neighbors' behavior
+            - This creates a feedback mechanism where the social term
+              depends on both own and neighbors' behavior
 
         Args:
             willing: The agent's own decision tendency. In the genetic algorithm
@@ -1362,13 +1605,20 @@ class City(Farmer):
 
         Note:
             The method iterates through all friends and evaluates each
-            relationship bidirectionally.
+            relationship bidirectionally, reusing this year's variates from
+            `draw_judgements` so that the result depends only on `willing`
+            (issue #61).
+
+        Raises:
+            KeyError: If `draw_judgements` has not run for the current
+                friend set — better than silently judging with fresh noise.
         """
         # Evaluate each friend
         dislikes, criticized = 0, 0
         for friend in self.friends:
-            dislikes += self.hate_a_behave(friend.decision)
-            criticized += friend.hate_a_behave(willing)
+            mine, theirs = self._judgements[friend.unique_id]
+            dislikes += self.hate_a_behave(friend.decision, draw=mine)
+            criticized += friend.hate_a_behave(willing, draw=theirs)
         return dislikes, criticized
 
     def change_mind(self, metric: str, how: str) -> bool:
@@ -1494,17 +1744,29 @@ class City(Farmer):
         """
         if seasonal_irr is None:
             seasonal_irr = self.total_wu
+        # 显式解析价格：优化目标必须和事后记录的目标是同一个函数，
+        # 漏传 `crop_prices` 会让差分进化只最小化水费（见 issue #15）。
+        if water_prices is None:
+            water_prices = self.water_prices
+        if crop_prices is None:
+            crop_prices = self.crop_prices
         boundaries = self.decide_boundaries(seasonal_irr)
         if boundaries[1] <= 0.0:
             self.surface_water = 0.0
             self.ground_water = 0.0
             return 0.0, 0.0
+        # 社会项对候选解只有二值依赖（在配额处跳变），所以这两个值一年算一次
+        # 就够，不必每评估一个候选解重算一遍（见 issue #72）。优化和事后记录
+        # 共用同一份，两者的目标函数也就必然是同一个。
+        standing = self.standing_by_decision()
         opt_surface, opt_ground = self.water_withdraw(
             ufunc=self.calc_payoff,
             surface_boundaries=boundaries,
             total_irrigation=seasonal_irr,
             water_prices=water_prices,
+            crop_prices=crop_prices,
             crop_yield=self.dry_yield,
+            standing=standing,
             **kwargs,
         )
         # Calculate payoff with optimized water allocation, without ranking, store results
@@ -1514,6 +1776,7 @@ class City(Farmer):
             q_ground=opt_ground,
             water_prices=water_prices,
             crop_prices=crop_prices,
+            standing=standing,
             rank=False,
             record=True,
         )
@@ -1555,6 +1818,8 @@ class City(Farmer):
             - `cwatqim.agents.city.change_mind`: Social learning mechanism
             - `cwatqim.agents.city.mutate_strategy`: Strategy mutation
         """
+        # 先把本年度的同侪判定随机数抽好：优化目标函数里不能再抽（见 #61）
+        self.draw_judgements()
         water_prices = self.water_prices
         crop_prices = self.crop_prices
         # Optimize water source allocation
@@ -1569,4 +1834,7 @@ class City(Farmer):
         # Learn from better performers and potentially mutate strategy for next year
         self.change_mind(metric="payoff", how="random")
         self.mutate_strategy(probability=self.p["mutation_rate"])
-        self.make_decision()
+        # Assign, don't just call: `make_decision` leaves `self` untouched (it
+        # only draws from the model RNG), so dropping its return value froze
+        # `_willing` at its `setup` value forever (#16).
+        self.willing = self.make_decision()

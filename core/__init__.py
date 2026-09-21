@@ -16,6 +16,8 @@ These utilities are designed to be independent and reusable across different
 parts of the model.
 """
 
+from typing import Any
+
 from .algorithms import ceil_divide, squeeze
 from .data_loaders import (
     CROPS,
@@ -23,13 +25,12 @@ from .data_loaders import (
     convert_mm_to_m3,
     update_city_csv,
     update_province_csv,
-    ureg,
 )
 from .payoff import (
     cobb_douglas,
     economic_payoff,
-    lost_reputation,
     sell_crop,
+    social_standing,
     water_costs,
 )
 
@@ -38,13 +39,34 @@ __all__ = [
     "squeeze",
     "update_city_csv",
     "update_province_csv",
-    "ureg",
     "CROPS",
     "convert_mm_to_m3",
     "convert_ha_mm_to_1e8m3",
     "cobb_douglas",
     "economic_payoff",
-    "lost_reputation",
     "sell_crop",
+    "social_standing",
     "water_costs",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Forward deprecated names to `cwatqim.core.payoff`, which warns.
+
+    `lost_reputation` is deliberately absent from the eager imports and from
+    `__all__`: importing it here would fire its `DeprecationWarning` on every
+    `import cwatqim`, and listing it would advertise a name whose meaning is
+    the reverse of its value (see issue #60).
+
+    Args:
+        name: Attribute requested from this package.
+
+    Returns:
+        The attribute resolved through `cwatqim.core.payoff`.
+
+    Raises:
+        AttributeError: If `payoff` does not define it either.
+    """
+    from . import payoff
+
+    return getattr(payoff, name)

@@ -11,145 +11,166 @@ This module provides functions for calculating various components of agent
 payoffs, including:
     - Economic benefits from crop production
     - Water costs
-    - Social costs (reputation loss)
+    - Social standing retained under peer criticism
     - Combined economic and social payoffs
 
 These functions are used by City agents to evaluate different water use
 strategies and make optimal decisions.
+
+Note:
+    The social term is a **multiplier on the payoff**, not a cost to
+    subtract: 1.0 is the untouched case and 0.0 the fully eroded one. It was
+    named and documented the other way round until issue #60.
 """
 
-from typing import Dict, Literal, Optional, Tuple, Union
+import warnings
+from typing import Any, Optional, Tuple
 
 import pandas as pd
-from loguru import logger
 
 from .algorithms import DictLikeType, squeeze
 from .data_loaders import WaterUnitType, convert_mm_to_m3
 
 
-def check_boundary(
-    low_boundary: float,
-    up_boundary: float,
-) -> None:
-    """检查边界值是否符合条件"""
-    if low_boundary < 0.0:
-        raise ValueError(f"Invalid lower boundary: {low_boundary}.")
-    if up_boundary < 0.0:
-        raise ValueError(f"Invalid up boundary: {up_boundary}.")
-    if low_boundary == up_boundary:
-        raise ValueError(f"Invalid boundary values: {low_boundary} == {up_boundary}.")
-
-
 def cobb_douglas(parameter: float, times: int) -> float:
-    """Calculate Cobb-Douglas function value.
+    """Multiplicative decay of what an agent keeps after `times` hits.
 
-    This function implements a simplified Cobb-Douglas form used for modeling
-    non-linear relationships, particularly in social cost calculations. The
-    function creates a decreasing exponential relationship where the output
-    decreases as `times` increases.
+    A simplified Cobb-Douglas form: each occurrence multiplies what is left by
+    `(1 - parameter)`, so the return value is what **survives**, not what is
+    lost. Nothing having happened yet (`times = 0`) leaves everything intact
+    and returns 1.0.
 
     Formula:
         f(parameter, times) = (1 - parameter) ** times
 
-    This is used to model:
-        - Reputation loss: Decreases exponentially with number of violations
-        - Social enforcement cost: Decreases with number of punishments
+    Used twice in the social term of the payoff — once for standing lost to
+    neighbours' criticism, once for the goodwill spent criticising them.
 
     Args:
-        parameter: Base parameter in range [0, 1]. Higher values lead to
-            faster decay. Typically represents a cost or loss rate.
-        times: Exponent representing the number of occurrences (e.g., number
-            of violations, number of punishments). Must be non-negative.
+        parameter: Per-occurrence loss rate in range [0, 1]. Higher values
+            decay faster.
+        times: Number of occurrences (violations caught, or reports filed).
+            Must be non-negative.
 
     Returns:
-        Function value in range [0, 1]. When times=0, returns 1.0. As times
-        increases, the value approaches 0.
+        The surviving share, in range [0, 1]: 1.0 when `times` is 0, falling
+        towards 0 as `times` grows.
 
     Raises:
         ValueError: If parameter is outside [0, 1].
 
     Example:
-        Calculate reputation loss after multiple violations:
+        What is left of an agent's standing after being caught twice:
 
         ```python
-        # High reputation sensitivity (0.8), 2 violations
-        loss = cobb_douglas(0.8, 2)  # (1-0.8)^2 = 0.04
+        # Loses 80% of what remains each time it is caught
+        cobb_douglas(0.8, 2)  # (1-0.8)^2 = 0.04 -> almost nothing left
 
-        # Low reputation sensitivity (0.2), 2 violations
-        loss = cobb_douglas(0.2, 2)  # (1-0.2)^2 = 0.64
+        # Loses only 20% each time
+        cobb_douglas(0.2, 2)  # (1-0.2)^2 = 0.64 -> most of it survives
         ```
 
     Note:
-        The function ensures that social costs decrease non-linearly with
-        repeated violations, modeling the idea that people become desensitized
-        to violations over time.
+        Read the value as a multiplier on the payoff, never as a cost to
+        subtract — the sign was documented backwards until issue #60.
     """
     if parameter > 1 or parameter < 0:
         raise ValueError("Parameter should be between 0 and 1.")
     return (1 - parameter) ** times
 
 
-def lost_reputation(
+def social_standing(
     cost: float, reputation: float, caught_times: int, punish_times: int
 ) -> float:
-    """Calculate reputation loss from rule violations and social enforcement.
+    """Social standing an agent **retains**, as a multiplier on its payoff.
 
-    This function models the social cost of violating water quota rules,
-    combining two mechanisms:
-        1. **Reputation Loss**: Cost from being caught and criticized by
-           neighbors. Decreases exponentially with number of violations
-           (people become desensitized).
-        2. **Enforcement Cost**: Cost from actively reporting others'
-           violations. Decreases with number of reports (reluctance to
-           repeatedly report).
+    Two mechanisms erode standing, each decaying multiplicatively via
+    `cobb_douglas`:
+        1. **Reputation**: eroded by every neighbour who criticises this
+           agent's over-withdrawal.
+        2. **Enforcement**: eroded by every neighbour this agent criticises --
+           reporting a peer is not free.
 
-    Both components use the Cobb-Douglas function to model non-linear decay.
-    The final cost is the average of both components.
+    The result is the average of the two surviving shares.
+
+    Formula:
+        s = [ (1 - cost)^punish_times + (1 - reputation)^caught_times ] / 2
 
     Args:
-        cost: Base enforcement cost parameter [0, 1]. Higher values indicate
-            greater initial cost of reporting others.
-        reputation: Base reputation sensitivity [0, 1]. Higher values indicate
-            greater initial reputation loss from being caught.
-        caught_times: Number of times the agent has been caught violating
-            rules (non-negative integer).
-        punish_times: Number of times the agent has reported others' violations
-            (non-negative integer).
+        cost: Per-report goodwill lost when criticising a neighbour, in
+            [0, 1] (the `City` parameter `s_enforcement_cost`).
+        reputation: Per-criticism standing lost when caught, in [0, 1]
+            (the `City` parameter `s_reputation`).
+        caught_times: Number of neighbours criticising this agent.
+        punish_times: Number of neighbours this agent criticises.
 
     Returns:
-        Combined reputation loss in range [0, 1], where:
-            - 0.0: No reputation loss (best case)
-            - 1.0: Maximum reputation loss (worst case)
-        The value is the average of enforcement cost and reputation loss.
+        Retained standing in range [0, 1], where:
+            - 1.0: nobody criticised, and nobody was criticised (best case)
+            - 0.0: standing entirely eroded (worst case)
 
     Example:
-        Calculate reputation loss for an agent:
-
         ```python
-        # Agent with high sensitivity, caught 3 times, reported others 1 time
-        loss = lost_reputation(
-            cost=0.5,
-            reputation=0.8,
-            caught_times=3,
-            punish_times=1
-        )
-        # Returns average of enforcement and reputation components
+        # Nothing has happened yet: standing is intact
+        social_standing(cost=0.5, reputation=0.8, caught_times=0, punish_times=0)
+        # -> 1.0
+
+        # Criticised by three neighbours, criticised one in turn
+        social_standing(cost=0.5, reputation=0.8, caught_times=3, punish_times=1)
+        # -> (0.5 ** 1 + 0.2 ** 3) / 2 = 0.254
         ```
 
     Note:
-        This function is used in the social cost calculation to determine
-        how much an agent's social satisfaction decreases due to rule
-        violations and enforcement actions.
+        Both the old name (`lost_reputation`) and its docstring described the
+        **complement** of what the arithmetic returns (see issue #60). The
+        direction matters: `City.agg_payoff` computes `payoff = e * s`, so a
+        value near 0 is the punishment and a value near 1 is the intact case.
+        Writing it up as a cost to subtract would invert the mechanism.
 
     See Also:
         - `cwatqim.core.payoff.cobb_douglas`: Underlying decay function
-        - `cwatqim.agents.city.calc_social_costs`: Method using this function
+        - `cwatqim.agents.city.City.calc_social_standing`: Method using it
     """
-    # lost reputation because of others' report
-    lost = cobb_douglas(reputation, caught_times)
-    # not willing to offensively report others
-    cost = cobb_douglas(cost, punish_times)
-    return (cost + lost) / 2
+    # what survives of this agent's reputation after neighbours criticised it
+    reputation_left = cobb_douglas(reputation, caught_times)
+    # what survives of its goodwill after it criticised neighbours in turn
+    goodwill_left = cobb_douglas(cost, punish_times)
+    return (goodwill_left + reputation_left) / 2
+
+
+_DEPRECATED_NAMES = {
+    # 旧名不是"过时"，是**反的**：下游拿到 0.95 会读成"损失了 95%"，然后写出
+    # `payoff = e * (1 - s)`。`cwatqim` 是带 DOI 的公开包（见 .zenodo.json、
+    # sync-public-repo.yml），删名字会打断外部引用，所以留垫片——但必须出声，
+    # 而且告警里要写明方向，否则会被当成纯改名而不去复核符号（见 #60）。
+    "lost_reputation": "social_standing",
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Forward deprecated names, warning about the direction they got wrong.
+
+    Args:
+        name: Attribute requested from this module.
+
+    Returns:
+        The replacement object, when `name` is a known deprecated alias.
+
+    Raises:
+        AttributeError: For any other name, as usual.
+    """
+    if name in _DEPRECATED_NAMES:
+        replacement = _DEPRECATED_NAMES[name]
+        warnings.warn(
+            f"`{name}` is deprecated; use `{replacement}`. Mind the direction: "
+            "it returns the social standing **retained** (1.0 = intact, 0.0 = "
+            "fully eroded), not a loss to subtract. The old name said the "
+            "opposite — check the sign of anything built on it (see issue #60).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return globals()[replacement]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def sell_crop(
@@ -356,7 +377,7 @@ def economic_payoff(
     q_ground: float,  # mm
     water_prices: DictLikeType,  # RMB/m3
     crop_yield: Optional[float] = None,  # t/ha
-    crop_prices: float = 1.0,  # RMB/t
+    crop_prices: Optional[DictLikeType] = 1.0,  # RMB/t
     area: float = 1.0,  # ha
     unit: WaterUnitType = "mm",
 ) -> float:
@@ -379,7 +400,8 @@ def economic_payoff(
         crop_yield: Optional crop yield in tonnes/ha. If None, only water
             costs are considered (negative payoff).
         crop_prices: Crop price in RMB/t. Default 1.0. Can be a single value
-            or dictionary for multiple crops.
+            or dictionary for multiple crops. Must not be None when
+            `crop_yield` is given (raises ValueError).
         area: Irrigated area in hectares. Default 1.0. Used for converting
             mm to m³ and calculating total crop revenue.
         unit: Unit of water volumes. Default "mm". Options: "mm", "m3", "1e8m3".
@@ -390,6 +412,9 @@ def economic_payoff(
             - Positive: Revenue exceeds costs (profitable)
             - Zero: Revenue equals costs (break-even)
             - Negative: Costs exceed revenue (loss)
+
+    Raises:
+        ValueError: If `crop_yield` is given but `crop_prices` is None.
 
     Example:
         Calculate payoff with crop production:
@@ -440,9 +465,17 @@ def economic_payoff(
         - `cwatqim.agents.city.water_withdraw`: Optimization using this function
     """
     costs = water_costs(q_surface, q_ground, water_prices, unit=unit, area=area)
-    # 如果没有作物产量，直接返回负的水费
-    if crop_yield is None or crop_prices is None:
+    # 如果没有作物产量（纯成本情景），直接返回负的水费
+    if crop_yield is None:
         return -round(costs, 2)
+    # 有产量却没有价格，说明调用方漏传了参数：静默降级成"只算水费"会让
+    # 优化目标悄悄丢掉作物收益（见 issue #15），因此这里必须报错。
+    if crop_prices is None:
+        raise ValueError(
+            "`crop_prices` is None while `crop_yield` is given: "
+            "cannot value the harvest. Pass crop prices explicitly, "
+            "or set `crop_yield=None` for a water-cost-only payoff."
+        )
     # 否则计算作物收益，减去水费
     reward = crops_reward(crop_yield, crop_prices, area)
     return round(reward - costs, 2)

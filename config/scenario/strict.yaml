@@ -1,0 +1,8 @@
+# @package _global_
+# Strict: from 1998 the quota is a hard constraint and agents must comply
+#
+# Rationale lives next to `- scenario:` in the primary config.
+
+City:
+  forced_since: 1998
+  include_s_since: 1998

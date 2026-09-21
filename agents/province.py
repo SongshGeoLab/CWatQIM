@@ -119,9 +119,14 @@ class Province(Actor):
 
     @property
     def managed(self) -> ActorsList[Actor]:
-        """该省所管辖的主体。
+        """该省所管辖的主体，按链接创建顺序排列。
         - 对于城市：是该城市所有的农民主体。
         - 对于省：是该省所有的市水资源管理单位。
+
+        Note:
+            顺序关系到可复现性：下属主体共享模型的随机数流，`update_graph` 等
+            方法每个主体取一次随机数。ABSESpy 自 v0.11.7 起才保证链接顺序稳定
+            （此前返回无序 `set`），因此 `pyproject.toml` 中限定了最低版本。
         """
         return self.link.get(self.breed, default=True)
 
@@ -343,7 +348,7 @@ class Province(Actor):
             - Observe neighbors' water use decisions
             - Compare their own performance with neighbors
             - Learn successful strategies from better performers
-            - Experience social costs when neighbors violate rules
+            - Lose social standing when they, or their neighbours, breach
 
         The network is created probabilistically, where each potential link
         between cities has probability `l_p` of being created. This creates

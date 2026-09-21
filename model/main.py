@@ -5,19 +5,14 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
-from typing import Literal, Optional
+from typing import Literal, Optional, TypeAlias
 
 import geopandas as gpd
 from abses import ActorsList, MainModel
 from loguru import logger
 
-from ..agents.city import City
+from ..agents.city import City, validate_policy_years
 from ..agents.province import Province
-
-try:
-    from typing import TypeAlias
-except ImportError:
-    from typing_extensions import TypeAlias
 
 ManagerType: TypeAlias = Literal["Province", "City"]
 
@@ -91,7 +86,9 @@ class CWatQIModel(MainModel):
         Raises:
             FileNotFoundError: If the city shapefile specified in `self.ds.cities.shp`
                 does not exist.
-            ValueError: If required attributes are missing from the shapefile.
+            ValueError: If required attributes are missing from the shapefile,
+                or if the policy timeline is one this model refuses to run
+                (see `cwatqim.agents.city.validate_policy_years`).
 
         Note:
             This method is called automatically by the ABSESpy framework during
@@ -101,11 +98,23 @@ class CWatQIModel(MainModel):
         See Also:
             - `cwatqim.agents.city.City`: The city agent class being created
         """
+        # 情景是一次运行的属性，不是每个主体各自的属性，所以在这里查一次，
+        # 而不是在 59 个 `City.setup` 里各查一遍；放在读 shapefile 之前，
+        # 配错情景时零 I/O 就失败（见 #59）。
+        validate_policy_years(
+            forced_since=self.settings.City["forced_since"],
+            include_s_since=self.settings.City["include_s_since"],
+        )
         cities = gpd.read_file(self.ds.cities.shp)
         self.agents.new_from_gdf(
             gdf=cities,
             agent_cls=City,
             attrs={"Province_n": "province", "City_ID": "City_ID"},
+            # 灌溉策略必须在构造时注入：`Farmer.__init__` 先调 `super().__init__()`
+            # （那才是跑 `setup()` 的地方），之后才写自己的默认值 4，所以在
+            # `City.setup` 里赋值一定会被盖掉——主体自报 Net Irrigation，而
+            # `simulate` 实际跑的是配置里的 Soil Moisture Targets（见 #62）。
+            irr_method=self.settings.City["irr_method"],
         )
 
     @property
@@ -273,6 +282,10 @@ class CWatQIModel(MainModel):
             2. Retrieves all collected City agent data from the datacollector
             3. Saves the data to a CSV file named `{run_id}_cities.csv`
 
+        A single (non-batch) run has no `run_id`; it is written as
+        `0_cities.csv`, so that the analysis layer — which parses the run id
+        back out of the file name — can still read it.
+
         The output CSV file contains all agent variables that were collected
         during the simulation, including:
             - Water use (surface_water, ground_water, total_wu)
@@ -295,3 +308,13 @@ class CWatQIModel(MainModel):
             - `water_quota_analysis.analysis.data_loader.DataLoader`: For loading
                 and processing simulation results
         """
+        logger.info("Simulation ends.")
+        # 确保输出目录存在
+        self.outpath.mkdir(parents=True, exist_ok=True)
+        df_cities = self.datacollector.get_agent_vars_dataframe("City")
+        # 单次运行没有 run_id，用 0 占位：分析层按文件名前缀解析整数 run_id，
+        # 落成 `None_cities.csv` 会被它静默跳过
+        run_id = 0 if self.run_id is None else self.run_id
+        outfile = self.outpath / f"{run_id}_cities.csv"
+        df_cities.to_csv(outfile)
+        logger.info(f"City records saved to {outfile}.")

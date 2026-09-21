@@ -1,0 +1,8 @@
+# @package _global_
+# Never: the quota never binds within the simulation window
+#
+# Rationale lives next to `- scenario:` in the primary config.
+
+City:
+  forced_since: 2020
+  include_s_since: 2020
