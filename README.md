@@ -1,8 +1,8 @@
 # CWatQIM: Crop-Water Quota Irrigation Model
 
 [![Release](https://img.shields.io/github/v/release/SongshGeoLab/CWatQIM)](https://github.com/SongshGeoLab/CWatQIM/releases)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.4305038.svg)](https://doi.org/10.5281/zenodo.4305038)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18250318.svg)](https://doi.org/10.5281/zenodo.18250318)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CoMSES](https://img.shields.io/badge/CoMSES-Model-blue)](https://www.comses.net)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 
@@ -41,27 +41,33 @@ pip install cwatqim
 
 This model is published on:
 
-- **Zenodo**: [10.5281/zenodo.4305038](https://doi.org/10.5281/zenodo.4305038)
+- **Zenodo**: [10.5281/zenodo.18250318](https://doi.org/10.5281/zenodo.18250318)
 - **CoMSES Net**: [Link will be added after submission]
 
 For citation and archival purposes, please use the Zenodo DOI.
 
 ## Quick Start
 
-After cloning the repository, run the model from the `cwatqim` directory (the package root):
+Run the model from the repository root — that directory *is* the package, and the
+data paths in `demo.yaml` are relative to it:
 
 ```bash
-cd cwatqim
-
-# Run with demo configuration (uses sample data in data/sample/)
-python -m cwatqim config_name=demo
+# Run with the demo configuration (uses the sample data in data/sample/)
+python -m cwatqim
 
 # Override configuration parameters
-python -m cwatqim config_name=demo exp.repeats=5 exp.num_process=4
+python -m cwatqim exp.repeats=5 exp.num_process=4
 
-# Override time range
-python -m cwatqim config_name=demo time.start=1985 time.end=1990
+# Override the time range — the years must stay strings, hence the quoting
+python -m cwatqim "time.start='1985'" "time.end='1990'"
+
+# Run the three published scenarios in one go
+python -m cwatqim --multirun scenario=baseline,never,strict
 ```
+
+`demo.yaml` is already selected by `@hydra.main(config_name="demo")`, so **do not**
+pass `config_name=demo` on the command line — Hydra would read it as a config
+override and stop with `Could not override 'config_name'`.
 
 ### Using Python API
 
@@ -100,9 +106,10 @@ The demo configuration uses sample data located in `data/sample/` directory, whi
 
 All paths in `demo.yaml` are relative to the `cwatqim` package root directory. You can override any configuration parameter via command line arguments or create your own configuration files.
 
-For example, to change the simulation time range:
+For example, to change the simulation time range (the years must stay strings —
+an unquoted `time.end=1990` becomes an int and ABSESpy rejects it):
 ```bash
-python -m cwatqim config_name=demo time.start=1985 time.end=1990
+python -m cwatqim "time.start='1985'" "time.end='1990'"
 ```
 
 ## Model Components
@@ -141,13 +148,15 @@ If you use this model in your research, please cite:
   author = {Song, Shuang},
   year = {2026},
   url = {https://github.com/SongshGeoLab/CWatQIM},
-  doi = {10.5281/zenodo.4305038}
+  doi = {10.5281/zenodo.18250318}
 }
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache License 2.0 — see [LICENSE](LICENSE) and
+[NOTICE](NOTICE). You may use, modify and redistribute it, including commercially,
+provided you keep the copyright notice and the NOTICE file and state what you changed.
 
 ## Acknowledgments
 

@@ -5,10 +5,22 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
+import math
 import warnings
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypeAlias
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Literal,
+    Optional,
+    Self,
+    Tuple,
+    TypeAlias,
+)
 
 import pandas as pd
 from abses import ActorsList
@@ -19,8 +31,23 @@ from aquacrop_abses.cell import get_crop_datetime
 from aquacrop_abses.farmer import Farmer
 from aquacrop_abses.load_datasets import crop_name_to_crop
 
-from ..core import economic_payoff, social_standing, update_city_csv
-from ..core.allocation import optimize_surface_share
+from ..core import (
+    aggregate_utility,
+    economic_payoff,
+    gross_revenue,
+    reports_defector,
+    social_standing,
+    update_city_csv,
+)
+from ..core.algorithms import require_one_of, require_unit_interval
+from ..core.allocation import solve_surface_share
+from ..core.culture import (
+    GRID_LEVELS,
+    grid_from_tightness,
+    group_from_index,
+    load_city_grid_z,
+    load_city_z,
+)
 from ..core.data_loaders import convert_ha_mm_to_1e8m3
 from .province import Province
 
@@ -35,7 +62,7 @@ def validate_policy_years(forced_since: int, include_s_since: int) -> None:
     `City.willing` tests `include_s_since` before `forced_since`, so in years
     below `include_s_since` the enforcement branch is unreachable. Whether that
     swallows enforcement *entirely* depends on the simulation window — with the
-    1980-2010 window of this study and `include_s_since` beyond 2010, a scenario
+    1980-2012 window of this study and `include_s_since` beyond 2012, a scenario
     asking for enforced compliance runs as "never" instead (issue #59).
 
     The three published scenarios all satisfy `forced_since >= include_s_since`,
@@ -54,7 +81,7 @@ def validate_policy_years(forced_since: int, include_s_since: int) -> None:
             f"City.forced_since ({forced_since}) precedes City.include_s_since "
             f"({include_s_since}). Enforced compliance cannot begin before the "
             "social term does: every year below include_s_since ignores "
-            "forced_since, so within this study's 1980-2010 window the run "
+            "forced_since, so within this study's 1980-2012 window the run "
             "would silently behave as the 'never' scenario. Use one of the "
             "three scenarios this model supports: strict "
             "(forced_since=include_s_since=1998), baseline "
@@ -220,6 +247,24 @@ class City(Farmer):
         "D": "Defect: use more water than quota.",
     }
 
+    #: 已发布过、随后删除的公开方法，以及它们的去向。`cwatqim` 带 DOI（见
+    #: `.zenodo.json`、`sync-public-repo.yml`），外部引用断了是引用不到 issue 的，
+    #: 所以删名字要出声。语义**没有对应物**（举报从伯努利抽签变成了确定性阈值规则），
+    #: 所以给桩而不是垫片。
+    #:
+    #: 只列**真正公开过**的名字：`v0.1.6` 里有 `hate_a_behave`，没有
+    #: `draw_judgements`（它只在内部分支上活过）。为没发布过的名字留桩，会让读者
+    #: 以为自己手上的旧版本有它，然后去翻一段不存在的历史。
+    _REMOVED_METHODS: Dict[str, str] = {
+        "hate_a_behave": (
+            "举报不再是抽签。旧的 `hate_a_behave(behave)` 内部掷一枚伯努利硬币；"
+            "现在规则是确定性的 `v > 1 − grid`，一条边的两端因此必然给出同样的判断"
+            "（见 issue #72、#110）。改用 `City.will_report(behave, my_decision)` ——"
+            "**多一个必填参数**，因为谁批评谁取决于双方的决定；或用纯函数 "
+            "`cwatqim.core.payoff.reports_defector(vengefulness, enforcement_cost)`。"
+        ),
+    }
+
     def __getattr__(self, name: str):
         """Dynamic attribute access for crop yield properties.
 
@@ -230,6 +275,16 @@ class City(Farmer):
         Supported patterns:
             - `dry_yield_{crop}`: Returns dry yield for the specified crop
             - `yield_potential_{crop}`: Returns potential yield for the crop
+
+        It also answers for the public methods removed in v0.2, so that an
+        external caller gets an explanation instead of a bare name error
+        (see `_REMOVED_METHODS` and issue #130).
+
+        Warning:
+            This is the **only** `__getattr__` on `City`. Defining a second one
+            anywhere in the class silently replaces this one, and the crop
+            yields above go NaN for a whole run without a single test failing
+            — the golden test does not cover yields. Add cases here instead.
 
         Args:
             name: Attribute name following the pattern above.
@@ -253,6 +308,11 @@ class City(Farmer):
         if name.startswith("yield_potential"):
             crop_name = name.split("_")[-1].capitalize()
             return self.yield_potential.get(crop_name)
+        if name in self._REMOVED_METHODS:
+            raise AttributeError(
+                f"`City.{name}` 已在 v0.2 中删除："
+                f"{self._REMOVED_METHODS[name]} 见 issue #130。"
+            )
         return super().__getattr__(name)
 
     @cached_property
@@ -336,6 +396,162 @@ class City(Farmer):
             This format is commonly used in data file naming conventions.
         """
         return f"C{self.city_id}"
+
+    @cached_property
+    def collectivism_z(self) -> float:
+        """This city's standardised prefecture-level collectivism index.
+
+        A `@cached_property` rather than something set in `setup()` for the
+        same reason as `climate`: `City_ID` is injected by `new_from_gdf`
+        *after* `setup()` runs, so `self.city_id` is still None in there.
+
+        Returns:
+            The standardised index for the wave named by
+            `City.s_group_wave`.
+
+        Raises:
+            KeyError: If this city is absent from the table. Deliberately
+                loud — a silent fallback would let a partial table shift the
+                whole basin's calibration without anyone noticing.
+        """
+        wave = int(self.p.get("s_group_wave", 2000))
+        table = load_city_z(str(self.ds.city_collectivism), wave)
+        try:
+            return table[self.city_id]
+        except KeyError as err:
+            raise KeyError(
+                f"{self.city_name} 不在集体主义指数表里（{self.ds.city_collectivism}，"
+                f"{wave} 波次）。重新生成：python scripts/build_city_collectivism.py"
+            ) from err
+
+    @property
+    def s_grid_level(self) -> str:
+        """Which resolution `City.s_grid` is calibrated at.
+
+        The single place `City.s_grid_level` is read and validated. Two callers
+        need it — `tightness_z` to pick the column, `s_grid` to decide whether
+        to short-circuit — and each used to read `self.p.get(...)` with its own
+        copy of the default. That is exactly the duplicated-magic-default shape
+        `s_grid` itself carries a docstring about removing (#129); it grew back
+        on the new key.
+
+        Returns:
+            The configured level, one of `GRID_LEVELS`; `"national"` if unset.
+
+        Raises:
+            ValueError: The configured level is not one of `GRID_LEVELS`.
+                Falling back silently would be worse than failing: the three
+                levels are different calibrations, and a typo would hand back
+                a complete set of results for the one nobody asked for.
+        """
+        return require_one_of(
+            "City.s_grid_level",
+            str(self.p.get("s_grid_level", "national")),
+            GRID_LEVELS,
+        )
+
+    @cached_property
+    def tightness_z(self) -> float:
+        """This city's standardised cultural-tightness index.
+
+        A `@cached_property` for the same reason as `collectivism_z`:
+        `City_ID` is injected by `new_from_gdf` *after* `setup()` runs.
+
+        Returns:
+            The index at the resolution named by `City.s_grid_level`
+            —— the province's own value at `province`, that value plus this
+            city's draw at `prefecture`.
+
+        Raises:
+            KeyError: If this city is absent from the table. Deliberately
+                loud, exactly as on the Group side: a silent fallback would
+                let a partial table shift the basin's calibration unnoticed.
+        """
+        level = self.s_grid_level
+        table = load_city_grid_z(
+            str(self.ds.city_tightness),
+            level=level,
+            spread=str(self.p.get("s_grid_spread", "se")),
+            seed=int(self.p.get("s_grid_draw_seed", 0)),
+        )
+        try:
+            return table[self.city_id]
+        except KeyError as err:
+            raise KeyError(
+                f"{self.city_name} 不在文化紧密度表里（{self.ds.city_tightness}，"
+                f"{level} 级）。重新生成：python scripts/build_city_tightness.py"
+            ) from err
+
+    @property
+    def s_grid(self) -> float:
+        """原文式(3) 的 Grid：举报一个违规邻居之后**留下**的 goodwill 份额。
+
+        配置值就是原文符号，不再取补（#210）。举报一次的**代价**因此是
+        `1 − grid`，整个模型里唯一的 `1 −` 只有 `social_standing` 里的
+        `(1 − group)^n`。
+
+        它在两处进入模型，读的必须是同一个值：`will_report` 用它做举报门槛
+        （`v > 1 − grid`），`standing_by_decision` 用它算已举报者剩下的
+        goodwill（`grid^m`）。原先两处各写一遍 `self.p.get(...)`，魔数默认值
+        重复且无人校验（issue #129）。
+
+        与 Group 侧同一条映射，但多一个分辨率开关，因为紧密度只到省级：
+        `City.s_grid_level` 取 `national`（全国标量）、`province`（逐省）或
+        `prefecture`（逐省 + 省均值不确定性的抽样）。κ 的**符号**是构念选择，
+        两种读法方向相反，见 `core.culture.grid_from_tightness` 的 Warning。
+
+        Returns:
+            `national` 或 κ=0 时是配置键 `City.s_grid`（缺省 0.5），否则是
+            `grid_from_tightness` 给出的逐城取值。
+
+        Raises:
+            ValueError: grid 非有限、落在 [0, 1] 之外，或 `s_grid_level` 不在
+                `GRID_LEVELS` 里。越界会让 `grid^m` 给出负的或大于 1 的
+                goodwill，社会项就此失去意义；非有限值要显式拒绝，因为
+                `nan <= 1` 是 False，区间守卫拦不住它（同一教训见
+                `core.culture`）。
+
+        Note:
+            `national` 与 κ=0 两个分支都在任何文件 I/O **之前**返回，所以关掉
+            这个开关的运行既不需要紧密度表，也与接入之前的模型逐比特相同
+            —— 与 `s_group` 的 κ=0 短路是同一条约定，golden 指纹依赖它。
+        """
+        base = require_unit_interval("City.s_grid", float(self.p.get("s_grid", 0.5)))
+        level = self.s_grid_level
+        kappa = float(self.p.get("s_grid_kappa", 0.0))
+        if level == "national" or kappa == 0.0:
+            return base
+        return grid_from_tightness(base=base, kappa=kappa, z=self.tightness_z)
+
+    @property
+    def s_group(self) -> float:
+        """The Group parameter actually used by this city's social term.
+
+        The source's `group`, used as it is: the share of standing **lost**
+        each time a neighbour criticises this city. It is complemented exactly
+        once, inside `social_standing`'s `(1 - group)^n` (#210).
+
+        Two things share this name and they are not the same: the **config**
+        key `City.s_group` is the national scalar (`group_bar`), while this
+        **property** is the per-city value derived from it.
+        `standing_by_decision` wants the latter.
+
+        Returns:
+            `group_bar` itself when `s_group_kappa` is 0, otherwise the
+            per-city value from `group_from_index`.
+
+        Note:
+            The `kappa == 0.0` branch returns before any file I/O, so a run
+            with culture switched off neither needs the index table nor
+            differs by a single bit from the pre-culture model. That exact
+            comparison is load-bearing: `base + 0.0 * z` would return NaN for
+            a NaN `z` instead of `base`, and `cobb_douglas` would not catch it.
+        """
+        base = float(self.p.get("s_group", 0.5))
+        kappa = float(self.p.get("s_group_kappa", 0.0))
+        if kappa == 0.0:
+            return base
+        return group_from_index(base=base, kappa=kappa, z=self.collectivism_z)
 
     # ========== Properties for data collection ==========
 
@@ -441,45 +657,43 @@ class City(Farmer):
         return self.compare("s")
 
     @property
-    def relative_utility(self) -> float:
-        """Utility recomputed from the two positions, in [0, 1]. Diagnostic.
+    def unit_payoff(self) -> float:
+        """单位毛收入的效用 —— 社会学习**实际**比较的量。
 
-        Collected alongside — not instead of — `payoff`, because the two are
-        different quantities (see issue #70):
+        `change_mind` 复制的是"比我强"的邻居的性状。用**绝对** payoff 比较时，
+        实际规则是"模仿最大的那个城市"：省内经济收益的极差中位数是 11 倍，而社会项
+        只是一个 `[0, 1]` 的折扣，几乎不可能改变谁排在前面（实测省内-年 `e·s` 与
+        `e` 的序相关中位数是 1.0000）。性状因此按灌溉面积而非行为被选择，
+        末年每个省只剩一个 boldness 取值，省均 boldness 与省级违规意图率的相关是
+        0.992 —— 模型的自由度塌缩到每省一个初始随机数（issue #110 §2.5、§2.6）。
 
-        - `payoff` is what agents actually maximise and learn from: the
-          **raw** product, in the units of `e` (RMB). Every call site leaves
-          `rank` at False, so this is the only utility in the dynamics.
-        - This one normalises both components against the friend set first,
-          giving a bounded number that is comparable across prefectures and
-          years.
+        除以毛收入让比较与城市规模无关，选择才由行为决定。
+
+        Returns:
+            `payoff / revenue`；没有收成、或毛收入非有限时返回 `0.0`。
+
+            **`0.0` 是一个被接受的占位，不是中性值**（issue #133，判定为保留现状）。
+            `revenue = 0` 时这个比值是 0/0、数学上无定义。
+
+            `City.payoff_floor` 已于 2026-09-01 删除（#213），效用回到 `e·s`，
+            所以亏损主体的 `unit_payoff` 重新是**负数**、`0.0` 这个哨兵重新赢过
+            它们——#133 记的 0.84% 共现回到窗口内外都可能出现。重跑后要复核这个数。
+
+            作者判定这在模型语义上可接受：绝收者仍可作为模仿对象。若日后要改，
+            哨兵值应落在所有真实取值**之下**（`-inf`），或让 `change_mind` 用
+            `ActorsList.select` 把无收成主体排除出候选集——并补一条断言**序**、
+            而不只是断言取值的测试。
+
+            非有限要一起挡住：`nan <= 0` 是 False，放过去会让 `unit_payoff` 变成
+            NaN，而 `change_mind` 里 `nan > x` 恒为 False —— 主体从此静默地再也
+            学不到东西（同一教训见 `core.culture`）。
 
         Note:
-            The ODD+D protocol calls its utility
-            $U=\\tilde{c}_e\\cdot\\tilde{c}_s$ and describes agents as ranked
-            "collectively". Neither matches the implementation: nothing in the
-            model ranks anything (`agg_payoff(rank=True)` had no caller before
-            this property), the normalisation is min-max rather than ordinal,
-            and it runs over the friend set rather than the whole basin. This
-            column is therefore a post-hoc diagnostic, **not** a faithful
-            rendering of the protocol's $U$ — the protocol is what needs
-            correcting, and collecting a column does not do that.
-
-            Because collection happens after every city has stepped, the
-            comparison set here is a clean same-year snapshot; the objective
-            function, had it ever ranked, would have seen a torn one (cities
-            step in shuffled order).
-
-        Both terms follow `include_s`, so this column changes meaning at
-        `include_s_since` — collect `include_s` alongside it.
+            量纲是"每元毛收入的效用"，因此天然落在 1 附近，可跨主体、跨年份比较。
         """
-        return self.agg_payoff(
-            e=self.e,
-            s=self.s,
-            rank=True,
-            include_s=self.include_s,
-            record=False,
-        )
+        if not math.isfinite(self.revenue) or self.revenue <= 0:
+            return 0.0
+        return self.payoff / self.revenue
 
     @property
     def crop_here(self) -> List[str]:
@@ -656,6 +870,41 @@ class City(Farmer):
         """
         return self.decide(self.surface_water)
 
+    @property
+    def last_decision(self) -> DecisionType:
+        """去年已实现的守约与否——**举报资格与被观察行为**的共同依据。
+
+        `judge_friends` 的两个方向都只读这一列：数"我批评了谁"时读我自己的和邻居
+        的 `last_decision`，数"谁批评我"时读邻居的。当年意图 `willing` 一度被试着
+        用在被观察的那一侧（`multirun/eq3_willing`），2026-08-31 撤回——统一在一个
+        时间断面上，社会判定才是边的属性而不是遍历顺序的产物（#72、#209）。
+
+        与 `decision` 的区别是时点：`decision` 读 `self.surface_water`，而那个值
+        在本年度 `step` 里会被覆盖，且城市是乱序推进的。于是同一次社会判定曾经同时
+        混了三个时间断面：自己的资格用去年、被评的候选用今年、朋友的行为则是"已经
+        走过的用今年、没走过的用去年"（issue #72 附加问题 2）。
+
+        模型在任何城市 step 之前调 `snapshot_decision` 统一冻结这一列，所以整年里
+        所有人读到的都是同一个 t−1 断面。这也是 `judge_friends` 里 `m` 与候选分支
+        无关的根源：候选决策属于今年，而资格只看这一列。
+
+        Returns:
+            "C" 或 "D"。
+
+        Note:
+            这是**同步更新**的约定，要写进 ODD+D：主体观察的是上一年的已实现状态，
+            而不是同年内滚动更新的状态。
+        """
+        return self._last_decision
+
+    def snapshot_decision(self) -> None:
+        """把当前已实现的守约与否冻结成本年度的观察集。
+
+        由 `CWatQIModel.step` 在 `cities.shuffle_do("step")` **之前**统一调用。
+        不消耗随机数，因此可以按固定顺序执行。
+        """
+        self._last_decision = self.decision
+
     def decide(self, q_surface: float) -> DecisionType:
         """Whether a given surface-water use counts as a breach.
 
@@ -710,8 +959,8 @@ class City(Farmer):
         See Also:
             - `cwatqim.agents.city.City.willing`: The other consumer of
               `include_s_since`
-            - `cwatqim.agents.city.City.agg_payoff`: Where the flag switches
-              `payoff = e * s` to `payoff = e`
+            - `cwatqim.agents.city.City.agg_payoff`: Where the flag selects
+              the branch that returns `e` instead of `e · s`
         """
         return self.time.year >= self.p["include_s_since"]
 
@@ -765,12 +1014,14 @@ class City(Farmer):
         self.boldness = self.random.random()
         self.vengefulness = self.random.random()
         self.willing = self.make_decision()
-        # 本年度的同侪判定随机数，`step` 开头刷新（见 #61）
-        self._judgements: Dict[int, Tuple[float, float]] = {}
+        # 上一年已实现的守约与否，模型在任何城市 step 之前统一快照（见 #72）
+        self._last_decision: DecisionType = self.decision
         # ===== Score-related attributes =====
         # income: -inf~inf
         # social benefits: 0~1
-        self.agg_payoff(e=0.0, s=1.0, record=True, rank=False, include_s=self.include_s)
+        self.agg_payoff(
+            e=0.0, s=1.0, revenue=0.0, record=True, include_s=self.include_s
+        )
 
     def yearly_dynamic(self, name: str) -> Any:
         """Read a dynamic variable, at most once per model year per city.
@@ -785,8 +1036,9 @@ class City(Farmer):
 
         That cost lands in two bad places: `calc_max_irr_seasonal` reads
         `wui` once per crop per year, and `calc_payoff` reads `irr_area`
-        inside the differential-evolution objective — where it was 90% of
-        every candidate evaluation.
+        inside the allocation objective, which the solver evaluates several
+        times per agent-year — it was 90% of every candidate evaluation back
+        when the solver was a differential evolution (removed in issue #94).
 
         The key is `(name, year, city_id)` — the full set of inputs
         `update_city_csv` reads. Two of those three are load-bearing:
@@ -1011,20 +1263,23 @@ class City(Farmer):
         total_irrigation: Optional[float] = None,
         surface_boundaries: Optional[Tuple[float, float]] = None,
         crop_yield: str = "dry_yield",
-        ga_kwargs: Optional[Dict[str, Any]] = None,
+        kink: Optional[float] = None,
         **kwargs,
     ) -> Tuple[float, float]:
-        """Optimize water source allocation using genetic algorithm.
+        """Solve the surface/ground split by enumerating the corners.
 
-        This method uses differential evolution (a genetic algorithm) to find
-        the optimal allocation of surface water and groundwater that maximizes
-        the agent's payoff function. The optimization considers:
-            - Crop yields (which depend on total irrigation)
-            - Water prices (different for surface and groundwater)
-            - Crop prices
-            - Social standing retained (if the payoff includes it)
+        The objective is **piecewise affine** in `q_surface`: crop revenue does
+        not depend on the split (`crop_yield` is bound before the solve, and
+        `simulate` runs afterwards), water cost is linear, and the social term
+        steps exactly once at the quota. A piecewise-affine function attains its
+        maximum at an endpoint, so the answer is one of at most three points and
+        no search is needed — see `cwatqim.core.allocation` and issue #94.
 
-        The optimization problem is:
+        This replaced `scipy.optimize.differential_evolution`, which was both
+        slower and less exact: it left a median relative residual of 0.0009
+        between its answer and the corner it was converging to.
+
+        The problem is:
             maximize: payoff(crop_yield, q_surface, q_ground, ...)
             subject to: q_surface + q_ground = total_irrigation
                         q_surface in [surface_lb, surface_ub]
@@ -1043,14 +1298,10 @@ class City(Farmer):
                 surface water use in mm. If None, uses (0.0, total_irrigation).
             crop_yield: Attribute name or dict containing crop yields.
                 Default "dry_yield" accesses `self.dry_yield`.
-            ga_kwargs: Additional parameters for differential_evolution:
-                - popsize: Population size multiplier (default: 15)
-                - maxiter: Maximum iterations (default: 100)
-                - polish: Use L-BFGS-B to polish solution (default: True)
-                - seed / rng: Source of randomness. Defaults to the model's
-                  numpy generator (`self.rng`), so that a fixed model seed
-                  yields reproducible allocations. Pass an int here to pin
-                  a single call instead.
+            kink: Where the objective breaks — the quota. Passing it adds the
+                compliant corner `q_surface = quota` to the candidate set, and
+                makes the affine check run per piece instead of over the whole
+                interval. None means the objective is affine throughout.
             **kwargs: Additional arguments passed to the payoff function.
                 Required if ufunc is None:
                 - water_prices: Dict with "surface" and "ground" keys (RMB/m³)
@@ -1084,9 +1335,11 @@ class City(Farmer):
             ```
 
         Note:
-            The optimization uses scipy's differential_evolution, which is
-            robust to local optima but may be slower than gradient-based
-            methods. The default parameters are tuned for this application.
+            The solve is exact and deterministic: it draws no random numbers,
+            so the same inputs always give the same split. `water_withdraw`
+            therefore no longer touches the model RNG at all (it used to, see
+            issue #18) — which also means removing it shifts every downstream
+            random draw.
         """
         if total_irrigation is None:
             total_irrigation = self.seasonal_irrigation
@@ -1105,19 +1358,49 @@ class City(Farmer):
 
         # 求解本身不依赖智能体，放在 `core.allocation` 里（见 issue #27）。
         # 这里只负责把 City 的状态翻成它要的参数：默认灌溉量、默认收益函数、
-        # 作物单产，以及模型自己的随机数发生器（见 issue #18）。
-        return optimize_surface_share(
+        # 作物单产，以及目标函数的拐点（配额）。
+        return solve_surface_share(
             ufunc,
             total_irrigation,
             surface_boundaries,
-            rng=self.rng,
-            ga_kwargs=ga_kwargs,
+            kink=kink,
             crop_yield=crop_yield,
             **kwargs,
         )
 
+    def link_friends(self, neighbours: Iterable[Self | None]) -> int:
+        """Link this agent to each given neighbour with a mutual "friend" edge.
+
+        The agent-side half of `MainModel.update_network`'s `observed` branch.
+        It lives here rather than on the model for the same reason
+        `Province.update_graph` does: creating a city's social ties is the
+        city's business, and the model should hand over a neighbour list rather
+        than reach in and wire links itself.
+
+        Args:
+            neighbours: The agents to befriend. `None` entries are skipped, so
+                the caller can pass a lookup's misses straight through — a
+                network node outside this run's city set is a routine case, not
+                an error (12 of the 69 network nodes are outside the basin).
+
+        Returns:
+            How many links were created.
+
+        Note:
+            Re-linking an existing friend is a no-op that preserves ordering
+            (`abses.human.links.add_a_link`), which is what lets the network be
+            rebuilt every year without `City.friends` reordering — and that
+            order is load-bearing for reproducibility (see `friends`).
+        """
+        linked = 0
+        for neighbour in neighbours:
+            if neighbour is not None:
+                self.link.to(neighbour, "friend", mutual=True)
+                linked += 1
+        return linked
+
     @property
-    def friends(self) -> ActorsList[Farmer]:
+    def friends(self) -> ActorsList[Self]:
         """Get neighboring agents in the social network ("friends").
 
         The social network represents information sharing and peer influence
@@ -1235,14 +1518,16 @@ class City(Farmer):
     ) -> float:
         """Social standing this agent would retain under a given withdrawal.
 
-        Turns a candidate `q_surface` into a compliance decision, asks
-        `judge_friends` who criticised whom, and hands the two counts to
-        `social_standing` — see that function for the returned multiplier and,
-        importantly, its direction (issue #60).
+        Turns a candidate `q_surface` into a compliance decision and looks the
+        answer up in the two-entry table `standing_by_decision` builds. The
+        peer counting and the call into `social_standing` happen **there**, not
+        here — see that function for the returned multiplier and, importantly,
+        its direction (issue #60).
 
-        Reads `s_enforcement_cost` and `s_reputation` from `self.p`, both
-        defaulting to 0.5. Peer evaluation follows multi-cultural theory
-        [@castillarho2017a].
+        The social term depends on the candidate allocation only through
+        whether it breaches the quota, so the table has exactly two entries and
+        this method is a lookup. Peer evaluation follows the social sub-model of
+        [@castillarho2017a]; the functional form is its Supplementary equation (3).
 
         Args:
             q_surface: Surface water use in units of 1e8 m³ (100 million m³).
@@ -1277,8 +1562,8 @@ class City(Farmer):
         whether it breaches the quota, so over the whole feasible domain it
         takes **two** values — it is a step function at the quota, not a
         continuous one. Computing it here, once, instead of inside every
-        differential-evolution objective evaluation is therefore exact rather
-        than approximate (see issue #72).
+        objective evaluation is therefore exact rather than approximate
+        (see issue #72).
 
         Measured: 7 cities over 20 years called the social term 18,962 times;
         this reduces that to 2 per agent-year.
@@ -1293,14 +1578,20 @@ class City(Farmer):
             — which cannot move the argmax at all. It is still computed here
             because `irrigating` records the realised payoff afterwards.
         """
-        s_enforcement_cost = self.p.get("s_enforcement_cost", 0.5)
-        s_reputation = self.p.get("s_reputation", 0.5)
+        grid = self.s_grid
+        # 逐城取值：`City.s_group_kappa` 为 0 时等于配置里的全国标量。
+        group = self.s_group
+        # `judge_friends` 对两个候选各跑一遍邻居循环，其中 `dislikes` 两支必然
+        # 相同、而 "C" 支的 `criticized` 必然是 0——所以**看起来**有一半是白算的。
+        # 不合并是有意的：合并要把这两条性质在这里再写一遍，等于给计数规则开第二
+        # 处定义（#129），也破坏 #72 要的「判断是边的属性」。省下的量级也不值：
+        # 整个目标函数只占约 3% 墙钟，AquaCrop 才是大头（见 `core.allocation`）。
         standing: Dict[DecisionType, float] = {}
-        for willing in self.valid_decisions:
-            dislikes, criticized = self.judge_friends(willing=willing)
-            standing[willing] = social_standing(
-                s_enforcement_cost,
-                s_reputation,
+        for candidate in self.valid_decisions:
+            dislikes, criticized = self.judge_friends(decision=candidate)
+            standing[candidate] = social_standing(
+                grid,
+                group,
                 criticized,
                 dislikes,
             )
@@ -1314,8 +1605,7 @@ class City(Farmer):
         water_prices: Optional[dict] = None,
         crop_prices: Optional[dict] = None,
         standing: Optional[Dict[DecisionType, float]] = None,
-        record: bool = False,
-        rank: bool = False,
+        record: bool = False,  # 最后优化完了，算一次并记录分数
     ) -> float:
         """Calculate combined economic and social payoff.
 
@@ -1323,15 +1613,19 @@ class City(Farmer):
         into a single payoff value. The payoff combines:
             - Economic score (e): Net economic benefit from crop production
               minus water costs
-            - Social score (s): Social satisfaction based on peer evaluations
+            - Social standing retained (s): what survives peer criticism, in
+              [0, 1] where 1.0 means nobody criticised (issue #60)
+            - Gross revenue (R): the yardstick the social term is priced
+              against
 
-        The final payoff is calculated as:
-            - If social factors included: payoff = e * s
-            - If only economic: payoff = e
+        The utility is multiplicative:
+            - With the social term: `U = e · s`
+            - Before `include_s_since`: `U = e` exactly (a branch, not a weight)
 
-        The economic score is calculated using `economic_payoff`, which
-        considers crop revenue and water costs. The social score is calculated
-        using `calc_social_standing`, which considers rule compliance and peer
+        The economic score is calculated using `economic_payoff` and the gross
+        revenue by `gross_revenue` — the same function supplies the minuend of
+        the former, so the two cannot drift. The social standing comes from
+        `calc_social_standing`, which considers rule compliance and peer
         behavior.
 
         Args:
@@ -1344,16 +1638,16 @@ class City(Farmer):
                 `self.water_prices`.
             crop_prices: Dictionary with crop prices in RMB/t. Keys should
                 match crop names. If None, uses `self.crop_prices`.
-            **kwargs: Additional arguments passed to `agg_payoff`, including:
-                - record: Whether to store scores as attributes (default: False)
-                - rank: Whether to convert scores to rankings (default: False)
-                - include_s: Whether to include social factors (default: True)
+            standing: Precomputed `{"C": ..., "D": ...}` from
+                `standing_by_decision`, so the two values are computed once per
+                agent-year instead of once per candidate (issue #72).
+            record: Whether to store `e` / `s` / `revenue` / `payoff` on the
+                agent. The optimiser leaves it False; `irrigating` sets it once
+                after the solve.
 
         Returns:
-            Combined payoff value. The range depends on whether ranking is
-            used:
-                - With ranking: [0, 1] (normalized relative to peers)
-                - Without ranking: [0, inf) for economic, [0, 1] for social
+            The utility `U`, in the units of `e` (RMB). `include_s` decides
+            whether it is `e * s` (floored) or plain `e` — see `agg_payoff`.
 
         Note:
             This method is typically called during water source optimization
@@ -1379,6 +1673,8 @@ class City(Farmer):
             area=self.irr_area,
             unit="1e8m3",
         )
+        # 社会项的标尺。与 `economic_payoff` 的被减数是同一个函数，不会漂移。
+        revenue = gross_revenue(crop_yield, crop_prices, self.irr_area)
         # 政策年之前 `agg_payoff` 会丢掉 s，没必要先算出来再扔——除非这一次
         # 调用要记录它（`record=True` 会把 s 写进主体、进而被采集）。短路只
         # 发生在优化循环里，落盘的值一个不差（见 issue #72）。
@@ -1387,96 +1683,102 @@ class City(Farmer):
         else:
             s = 1.0
         return self.agg_payoff(
-            e=e, s=s, include_s=self.include_s, record=record, rank=rank
+            e=e,
+            s=s,
+            revenue=revenue,
+            include_s=self.include_s,
+            record=record,
         )
 
     def agg_payoff(
         self,
         e: float,
         s: float,
+        revenue: float,
         record: bool = False,
         include_s: bool = True,
-        rank: Optional[bool] = False,
     ) -> float:
         """Aggregate economic and social scores into final payoff.
 
-        This method combines economic and social scores into a single payoff
-        value that represents the agent's overall performance. The method
-        supports two modes:
-            1. **Ranking mode**: Converts absolute scores to relative rankings
-               within the social network (used during optimization)
-            2. **Absolute mode**: Uses raw scores (used for final evaluation)
+        The aggregation is **multiplicative** — criticism discounts the whole
+        payoff rather than subtracting a priced share of it:
 
-        The payoff calculation:
-            - If ranking: Converts both e and s to [0, 1] rankings, then
-              multiplies: payoff = rank_e * rank_s
-            - If not ranking: Uses raw scores: payoff = e * s (or just e)
+            U = e * s
+
+        This restores the form used by the reference literature, which is what
+        makes the deterrent ratio `s(C)/s(D)` the right reading again
+        (`water_quota_analysis.analysis.social_cost`). It reverses PR #132.
+
+        The sign defect that comes with it (issue #121: `e < 0` inverts the
+        penalty, ~12.5% of city-years) is **deliberately kept** as of
+        2026-09-01: where the economics is already a negative incentive, the
+        social term turning into a reward is an acceptable reading. The
+        `City.payoff_floor` that used to correct the sign was removed instead,
+        because it flattened the objective wherever it bound and left 12.5% of
+        agent-years with no allocation decision at all (issue #213); the full
+        argument is in `aggregate_utility`. What remains is the saturation of
+        the ratio channel (issue #110).
+
+        There is no social weight: `lambda` has nowhere to sit in a product, so
+        `City.s_weight` was retired with this change.
 
         Args:
             e: Economic score, representing net economic benefit. Range
                 typically [0, inf), but can be negative if costs exceed
                 revenue.
-            s: Social score, representing social satisfaction. Range [0, 1],
-                where 1.0 is maximum satisfaction.
+            s: Social standing **retained**, in [0, 1], where 1.0 means nobody
+                criticised (issue #60 — read it as what survives, never as a
+                cost to subtract).
+            revenue: Gross crop revenue. It no longer enters the utility —
+                the multiplicative form has no yardstick to price against — but
+                it is still recorded (`self.revenue`) because the analysis side
+                reads it, notably to express the economic temptation and the
+                deterrent on the same scale. Deliberately has **no default**:
+                the caller always knows it, and a 0.0 fallback would put a
+                wrong number in the collected column.
             record: If True, stores the scores as agent attributes (self.e,
-                self.s, self.payoff). Set to False during optimization to
-                avoid side effects.
-            include_s: If True, includes social factors in payoff calculation.
-                If False, payoff = e (economic only).
-            rank: If True, converts scores to relative rankings within the
-                social network before aggregation. This is useful during
-                optimization to compare performance relative to peers rather
-                than absolute values.
+                self.s, self.revenue, self.payoff). Set to False during the
+                solve to avoid side effects.
+            include_s: If True, `U = e * s`. If False, U is **exactly** `e` —
+                a branch, since a product has no weight to zero out.
 
         Returns:
-            Final payoff value. Range depends on mode:
-                - Ranking mode: [0, 1]
-                - Absolute mode with social: [0, inf) (depends on e)
-                - Absolute mode without social: [0, inf) (same as e)
+            The utility U, in the units of `e` (RMB). It carries the sign of
+            `e`; on loss-making years `U` therefore *rises* as `s` falls (see
+            `aggregate_utility`).
+
+        Raises:
+            ValueError: Propagated from `aggregate_utility` when `e` or `s` is
+                non-finite, or `s` falls outside [0, 1].
 
         Example:
-            Rank against friends, which is what `ranked_utility` collects.
-            Note that the optimizer does **not** rank — `irrigating` goes
-            through `calc_payoff`, which leaves `rank` at its default of
-            False, so agents maximise the raw product (see issue #70):
-
-            ```python
-            utility = city.agg_payoff(
-                e=city.e,
-                s=city.s,
-                rank=True,  # Compare relative to friends
-                record=False,  # Collecting must not mutate the agent
-            )
-            ```
-
-            Calculate and record final payoff:
+            Calculate and record the final utility:
 
             ```python
             payoff = city.agg_payoff(
                 e=economic_score,
                 s=social_score,
-                rank=False,  # Use absolute scores
-                record=True  # Store for analysis
+                revenue=gross_revenue_score,
+                record=True,  # Store for analysis
             )
-            # Now city.e, city.s, city.payoff are set
+            # Now city.e, city.s, city.revenue, city.payoff are set
             ```
 
         Note:
-            The ranking mechanism uses the `compare` method to normalize
-            scores relative to friends in the social network. This creates
-            a competitive dynamic where agents compare themselves to peers.
+            返回的始终是**绝对**效用。这里曾有一个 `rank=` 开关，按朋友集把效用
+            min-max 归一；它随加性效用一起退役（`relative_utility` 已删），退役后
+            零调用者，于是连同它那段文档一并删掉。要比位次请直接用
+            `City.compare`——`economic_position` / `social_position` 走的就是它。
         """
-        # Convert economic and social scores to relative rankings among friends
-        if rank:
-            e = self.compare("e", my=e)
-            s = self.compare("s", my=s)
-        if include_s:
-            payoff = e * s
-        else:
-            payoff = e
+        # 乘性形式没有权重旋钮，所以 `include_s` 是一个**分支**而不是 λ=0：
+        # 窗口外直接返回 e（**不夹下限**——没有乘法就不该改动经济收益，否则
+        # `never` 情景会跟着动，而它逐位不变是一条有用的一致性检验），
+        # 窗口内才乘上 s。
+        payoff = aggregate_utility(economic=e, standing=s) if include_s else e
         if record:
             self.e = e
             self.s = s
+            self.revenue = revenue
             self.payoff = payoff
         return payoff
 
@@ -1518,107 +1820,160 @@ class City(Farmer):
         else:
             self.vengefulness = self.random.random()
 
-    def draw_judgements(self) -> None:
-        """Draw this year's peer-judgement variates, once.
+    def will_report(self, behave: DecisionType, my_decision: DecisionType) -> bool:
+        """Whether this agent criticises a neighbour showing `behave`.
 
-        Each `(self, friend)` pair needs two uniform draws: one for whether
-        this agent criticises that friend, one for whether that friend
-        criticises this agent.
+        Reporting a peer is a **decision**, not a coin flip. Filing a report
+        costs goodwill — `s_grid` is the share that **survives** one report, so
+        the cost is its complement `1 - grid` — and an agent files only when
+        the norm matters to it more than the report costs. Folding the marginal
+        cost into the same utility as everything else, the economic payoff `e`
+        cancels and leaves a dimensionless rule:
 
-        Drawing them once per year is what keeps `calc_social_standing` a
-        deterministic function of the candidate allocation. It runs inside the
-        differential-evolution objective, and drawing per call made the same
-        candidate score differently on each evaluation — precisely what
-        `differential_evolution` assumes cannot happen (issue #61).
+            report the (m+1)-th defector  iff  v > (1 - grid) * grid^m
 
-        Redrawn at the start of every `step`, so judgement is still stochastic
-        across years; it is frozen only *within* one year's optimization.
-        """
-        self._judgements = {
-            # 两个数都从模型那条共享随机流里抽（`friend.random` 与
-            # `self.random` 本就是同一个对象），顺序由 `friends` 定
-            friend.unique_id: (self.random.random(), self.random.random())
-            for friend in self.friends
-        }
+        Derivation: under `U = e * s`, one more report multiplies the surviving
+        goodwill by `grid`, so it costs `e * grid^m * (1 - grid) / 2` of
+        utility; write the normative satisfaction as `e * v / 2`, i.e. `v`
+        times the most goodwill anyone can hold, and divide both sides by `e`.
 
-    def hate_a_behave(self, behave: DecisionType, draw: float) -> bool:
-        """Determine whether to dislike a behavior, generating social discontent.
+        **That division assumes `e > 0`.** Where the economic payoff is negative
+        — about 11% of city-years, and 18.6% of the decisions where the quota
+        actually binds — dividing flips the inequality, so the rule as
+        implemented is not the one the derivation gives. This is the same
+        multiplicative sign defect as issue #121, reaching enforcement rather
+        than compliance; the implementation deliberately keeps the flat rule
+        `v > 1 - grid` for every agent.
 
-        This method implements the judgment mechanism for evaluating others'
-        behavior. The decision follows these rules:
-            1. If the agent itself is violating rules ("D"), it will not
-               criticize others (no moral authority)
-            2. If the other agent is complying ("C"), there is nothing to
-               criticize
-            3. If the other agent is violating ("D"), the agent may or may
-               not criticize based on its vengefulness parameter
+        The threshold **falls** with `m`, because the Cobb-Douglas form makes
+        each further report cheaper in absolute terms. Enforcement is therefore
+        all-or-nothing: an agent that files the first report files every one,
+        and the rule collapses to `v > 1 - grid`. That is what this method
+        implements, and it is why the fraction of compliant agents who enforce
+        is `grid` for `v ~ U(0, 1)`.
+
+        Two honest caveats:
+
+        1. At `grid = 1` the threshold is 0, so the rule becomes `v > 0` —
+           every eligible agent always reports (reporting has become free). It
+           does **not** revert to "v is the reporting probability"; that was
+           the old Bernoulli rule (`draw <= vengefulness`), and nothing here
+           restores it.
+        2. The `v / 2` on the benefit side is a **normalisation choice**, not a
+           derived quantity: it reads the satisfaction of enforcing a norm as
+           `v` times half of the most goodwill anyone can hold. Under the
+           product form `s = grid^m * (1 - group)^n` that ceiling is 1, so the
+           halving is now a bare convention rather than something the average
+           form handed us. Writing it as `v * 1` instead would give
+           `v > (1 - grid) / 2`, moving the enforcement share from `grid` to
+           `(1 + grid) / 2` — 39% to 70% at the calibrated 0.39. The *shape*
+           is robust (monotone in `grid`, all-or-nothing per agent); the level
+           rides on this choice and belongs in the sensitivity analysis.
+
+        Why it changed (issues #110, #72): the old rule was
+        `draw <= self.vengefulness`, an unconditional Bernoulli. `grid` had no
+        way in, so it could only ever act through the *ratio* `s(C)/s(D)` — and
+        that channel is saturated, because a single critic already produces a
+        deterrent of `1 / (1 - group) = 1.89` while the economic temptation is
+        1.114 at the median. Enforcement is the **extensive** margin.
+
+        Under t-1 eligibility this rule is `grid`'s **only** channel into
+        compliance, and its sign is therefore unambiguous: a larger `grid`
+        means cheaper reporting, more enforcers, a larger `n`, and a stronger
+        deterrent. The
+        `grid^m` factor is identical on both branches (see `judge_friends`),
+        so it cancels out of `s(C)/s(D)` entirely and cannot pull the other
+        way. That second channel exists only under candidate-based
+        eligibility, which was tried and rejected on 2026-08-31 (issue #209).
 
         Args:
-            behave: The other agent's decision behavior ("C" or "D").
-            draw: This year's uniform variate for the judging pair, from
-                `draw_judgements`.
+            behave: The neighbour's decision being judged, "C" or "D".
+            my_decision: This agent's **own** compliance state, which decides
+                whether it is entitled to criticise at all. Deliberately has no
+                default: both callers pass `last_decision`, but they read it
+                off *different agents*, and a default would silently pick one.
+                See `judge_friends`.
 
         Returns:
-            True if the agent dislikes the behavior (will generate social
-            discontent), False otherwise.
+            True if this agent files a report.
 
         Note:
-            The variate is passed in, not drawn here — see `draw_judgements`
-            (issue #61).
+            Deterministic — it draws nothing. Both sides of a pair therefore
+            agree by construction, which is what #72 asked for: a judgement is
+            a property of the **edge**, and the old per-agent `_judgements`
+            table kept two independent random ledgers for the same event.
+
+            Eligibility is always read off `last_decision`, which the model
+            snapshots before any city steps (`snapshot_decision`), so the
+            observation set is the realised state of year t-1 for everyone —
+            no longer a mix of three time slices, and not a function of the
+            candidate branch being priced.
         """
-        # If agent itself is violating rules, has no authority to criticize
-        if self.decision == "D":
+        # 自己违规就没有资格批评别人（按去年已实现的状态判定）。资格由调用方
+        # **显式**给出，因为两个方向要读同一个断面（见 issue #72、#209）。
+        if my_decision == "D":
             return False
-        # If other agent is complying, nothing to criticize
+        # 对方守约，没什么可批评的
         if behave == "C":
             return False
-        # If other agent is violating, may criticize based on vengefulness
-        return draw <= self.vengefulness
+        # 规范重视程度要压过举报的代价。规则只有一份定义，分析层画执法率的
+        # 那张图走的是同一份（`core.payoff.enforcement_share`，见 #129）。
+        return reports_defector(self.vengefulness, self.s_grid)
 
-    def judge_friends(self, willing: DecisionType) -> Tuple[int, int]:
-        """Count who criticises whom, the input to the social term.
+    def judge_friends(self, decision: DecisionType) -> Tuple[int, int]:
+        """Count who criticises whom — the two exponents of the social term.
 
-        This method implements peer evaluation based on multi-cultural theory,
-        inspired by research published in Nature Human Behavior [@castillarho2017a].
-        The mechanism captures how agents perceive fairness and social norms:
+        The social term is `s = grid^m * (1 - group)^n` (Castilla-Rho et al.
+        2017, SI eq. 3; the config keys `s_grid` / `s_group` hold the source's
+        symbols as they are — see `core.payoff.social_standing` and issue
+        #210). This method produces the pair `(m, n)`:
 
-        Key mechanisms:
-            - If an agent observes neighbors violating rules while itself
-              complies, it experiences social discontent (feeling of unfairness)
-            - If an agent's vengefulness is high, it will strongly dislike
-              rule-violating friends, reducing both agents' social satisfaction
-            - This creates a feedback mechanism where the social term
-              depends on both own and neighbors' behavior
+            m = `dislikes`, neighbours **this** agent criticises
+            n = `criticized`, neighbours who criticise **this** agent
+
+        **Eligibility on both directions reads year t-1** (`last_decision`),
+        never the candidate `decision` being priced. Two consequences worth
+        keeping straight, because they decide what the whole social channel
+        can and cannot do:
+
+        1. `m` is **the same on both branches** — whether I intend to comply
+           this year does not change whether I complied last year. So
+           `grid^m` cancels out of the deterrent
+           `s(C)/s(D) = (1 - group)^(-n)`, and `grid` reaches compliance only
+           through the enforcement share `grid` in `will_report`, which sets
+           the distribution of `n`.
+        2. The deterrent is therefore always `>= 1`: complying is never
+           socially worse than defecting.
+
+        Candidate-based eligibility ("defecting this year strips my standing
+        to criticise") was implemented and measured on 2026-08-31 to put
+        `grid` back into the ratio. It does, but it also makes ~19% of the
+        parameter plane invert (1. above fails), raises the breach rate by
+        2.9 pp, and breaks #72's edge consistency on the outgoing direction.
+        Rejected — see issue #209 and `multirun/floor_elig` for the run.
 
         Args:
-            willing: The agent's own decision tendency. In the genetic algorithm
-                context, this is a temporary decision intention being evaluated.
-                If this intention leads to higher payoff, the agent will tend
-                to adopt it.
+            decision: The candidate branch being priced, "C" or "D". It moves
+                `criticized` only; `dislikes` is invariant to it by design.
 
         Returns:
-            Tuple of (dislikes, criticized) where:
-                - dislikes: Number of friends the agent dislikes (affects
-                  social discontent level)
-                - criticized: Number of friends who criticize the agent's
-                  behavior (affects reputation assessment)
+            `(dislikes, criticized)` = `(m, n)`, to be passed to
+            `core.payoff.social_standing` in that order.
 
-        Note:
-            The method iterates through all friends and evaluates each
-            relationship bidirectionally, reusing this year's variates from
-            `draw_judgements` so that the result depends only on `willing`
-            (issue #61).
-
-        Raises:
-            KeyError: If `draw_judgements` has not run for the current
-                friend set — better than silently judging with fresh noise.
+        See Also:
+            - `cwatqim.agents.city.City.will_report`: the per-edge rule.
+            - `water_quota_analysis.analysis.social_cost.standing_by_branch`:
+              the closed form of the two branches, kept in parity with this
+              method by `tests/analysis/test_social_cost.py::TestModelParity`.
         """
-        # Evaluate each friend
         dislikes, criticized = 0, 0
         for friend in self.friends:
-            mine, theirs = self._judgements[friend.unique_id]
-            dislikes += self.hate_a_behave(friend.decision, draw=mine)
-            criticized += friend.hate_a_behave(willing, draw=theirs)
+            # 我的资格看自己的 t−1：候选决策改不了我去年守没守约。
+            dislikes += self.will_report(
+                friend.last_decision, my_decision=self.last_decision
+            )
+            # 朋友的资格同样看他的 t−1：他今年的行为在我求解时还不存在。
+            criticized += friend.will_report(decision, my_decision=friend.last_decision)
         return dislikes, criticized
 
     def change_mind(self, metric: str, how: str) -> bool:
@@ -1641,9 +1996,13 @@ class City(Farmer):
 
         Args:
             metric: Performance metric for comparison. Options:
+                - "unit_payoff": utility per unit of gross revenue. This is
+                  what `step` uses, and the only one that is scale-free —
+                  see the property's docstring for why comparing absolute
+                  `payoff` degenerates into "imitate the biggest city".
                 - "e": Economic score (net economic benefit)
-                - "s": Social score (social satisfaction)
-                - "payoff": Combined score (e * s)
+                - "s": Social score (social standing retained)
+                - "payoff": Absolute utility, in RMB
             how: Learning strategy when multiple better neighbors exist:
                 - "best": Learn from the neighbor with the highest metric value
                 - "random": Learn from a randomly selected better neighbor
@@ -1657,7 +2016,7 @@ class City(Farmer):
             Learn from best-performing friend:
 
             ```python
-            learned = city.change_mind(metric="payoff", how="best")
+            learned = city.change_mind(metric="unit_payoff", how="best")
             if learned:
                 print(f"Updated boldness: {city.boldness}")
                 print(f"Updated vengefulness: {city.vengefulness}")
@@ -1767,9 +2126,12 @@ class City(Farmer):
             crop_prices=crop_prices,
             crop_yield=self.dry_yield,
             standing=standing,
+            # 配额就是目标函数的拐点，也是"守约角点"。`willing == "D"` 时它落在
+            # 可行域内部，于是社会项能把违规意图改判回守约（见 #94、#110）。
+            kink=self.quota,
             **kwargs,
         )
-        # Calculate payoff with optimized water allocation, without ranking, store results
+        # 用最优配水再算一次并落盘：优化期间 `record=False`，这里才写进主体
         self.calc_payoff(
             crop_yield=self.dry_yield,
             q_surface=opt_surface,
@@ -1777,7 +2139,6 @@ class City(Farmer):
             water_prices=water_prices,
             crop_prices=crop_prices,
             standing=standing,
-            rank=False,
             record=True,
         )
         return opt_surface, opt_ground
@@ -1818,8 +2179,6 @@ class City(Farmer):
             - `cwatqim.agents.city.change_mind`: Social learning mechanism
             - `cwatqim.agents.city.mutate_strategy`: Strategy mutation
         """
-        # 先把本年度的同侪判定随机数抽好：优化目标函数里不能再抽（见 #61）
-        self.draw_judgements()
         water_prices = self.water_prices
         crop_prices = self.crop_prices
         # Optimize water source allocation
@@ -1831,8 +2190,10 @@ class City(Farmer):
         self.simulate(
             repeats=self.p.get("repeats", 1)
         )  # Crops require this amount of water
-        # Learn from better performers and potentially mutate strategy for next year
-        self.change_mind(metric="payoff", how="random")
+        # Learn from better performers and potentially mutate strategy for next year.
+        # 比的是**单位毛收入**的效用，不是绝对值：后者等于"模仿最大的城市"，
+        # 性状会按灌溉面积而不是行为被选择（见 `unit_payoff` 与 issue #110）。
+        self.change_mind(metric="unit_payoff", how="random")
         self.mutate_strategy(probability=self.p["mutation_rate"])
         # Assign, don't just call: `make_decision` leaves `self` untouched (it
         # only draws from the model RNG), so dropping its return value froze

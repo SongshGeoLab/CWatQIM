@@ -7,7 +7,7 @@ name = "cwatqim"
 dynamic = ["version"]
 description = "Crop-Water Quota Irrigation Model - ABM for Yellow River water allocation"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "Shuang Song", email = "songshgeo@gmail.com"}
 ]
@@ -25,7 +25,7 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Hydrology",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
@@ -59,7 +59,7 @@ Documentation = "https://github.com/SongshGeoLab/CWatQIM#readme"
 Repository = "https://github.com/SongshGeoLab/CWatQIM"
 Issues = "https://github.com/SongshGeoLab/CWatQIM/issues"
 Changelog = "https://github.com/SongshGeoLab/CWatQIM/blob/main/CHANGELOG.md"
-"DOI" = "https://doi.org/10.5281/zenodo.4305038"
+"DOI" = "https://doi.org/10.5281/zenodo.18250318"
 
 [tool.hatch.version]
 path = "__init__.py"
@@ -73,4 +73,22 @@ include = [
     "docs/**/*.md",
     "config/**/*.yaml",
     "data/sample/**",
+    "LICENSE",
+    "NOTICE",
 ]
+# 公开仓库的**根目录就是包目录**（`sync-public-repo.yml` 把 `cwatqim/` 的内容
+# 同步到公开仓库根），所以源码树里没有 `cwatqim/` 这一层可供 hatchling 推断。
+# 不给这条映射，打出来的 wheel 顶层就是 `core/`、`agents/`、`model/`、`data/`：
+# 装完 `import cwatqim` 直接 ModuleNotFoundError，而且这些通用名字会被塞进
+# 复现者的 site-packages、撞坏无关的包（见 #260）。
+#
+# ⚠️ 本机察觉不到这个问题：venv 里的 `_editable_impl_water_quota.pth` 把私有
+# 仓库根放进了 sys.path，`import cwatqim` 能成是那个 .pth 的功劳。改这一段之后
+# 必须**打包验证**，不能只在本机 import 一下：
+#     python -m build --wheel && unzip -l dist/*.whl | head
+sources = {"" = "cwatqim"}
+# `sources` 这种**加前缀**的重写会让 hatchling 拒绝 dev 模式安装
+# （editables#20）。私有 monorepo 正是 editable 装这个包的，所以显式告诉它：
+# editable 安装把**上一级目录**放进 sys.path —— 那里的 `cwatqim/` 就是包本身。
+# 公开布局下没人用 editable，走上面的 `sources` 打正常 wheel。
+dev-mode-dirs = [".."]

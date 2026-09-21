@@ -121,10 +121,13 @@ def update_province_csv(
 
     Returns:
         Float value for the province in the current year. Typically represents
-        water quota in 1e8 m³.
+        water quota in 1e8 m³. On tick 0 — the model's start year, which is
+        never simulated — a missing year falls back to the table's earliest
+        year; see the note below.
 
     Raises:
-        KeyError: If the year or province name is not found in the DataFrame.
+        KeyError: If the province name is not found, or if the year is missing
+            while the model is actually running (tick > 0).
 
     Example:
         Use as dynamic variable update function:
@@ -145,6 +148,17 @@ def update_province_csv(
         The function assumes the DataFrame index contains years and columns
         contain province names matching `obj.name_en`.
     """
+    if time.tick == 0 and time.year not in data.index:
+        # ABSESpy 建动态变量时就求一次值（`BaseDynamicVariable.__init__` 末尾
+        # 调 `now()`），求的是**窗口起点**那一年。而起点比第一个被模拟的年份早
+        # 一年——那一年是 spin-up，读进分析之前就被丢掉（见 #205 与
+        # `config/config.yaml` 的 `time` 块），配额表里通常没有它（表从 1980 起，
+        # 起点是 1979）。
+        #
+        # 这个值不会被任何一步用到：每一步开头 `Province.update_data` 都按当年
+        # 重新求值。所以只在 tick 0 上用表里最早的一年占位，跑起来之后年份缺失
+        # 仍旧抛 KeyError——否则"某一年的配额没进表"会被静默顶替成别的年份。
+        return data.loc[data.index.min(), obj.name_en]
     return data.loc[time.year, obj.name_en]
 
 

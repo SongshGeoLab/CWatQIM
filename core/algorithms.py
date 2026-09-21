@@ -8,11 +8,12 @@
 """Core algorithms and utility functions for the model.
 
 This module provides fundamental algorithms used throughout the model,
-including allocation algorithms, data type conversions, and aggregation
-functions.
+including allocation algorithms, data type conversions, aggregation
+functions, and the shared numeric guards.
 """
 
-from typing import Callable, Dict, Optional, TypeAlias, Union
+import math
+from typing import Callable, Dict, Iterable, Optional, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
@@ -166,3 +167,121 @@ def squeeze(
     if isinstance(item, pd.Series):
         return aggfunc(item.values)
     raise TypeError(f"Unknown type {type(item)}.")
+
+
+def require_finite(name: str, value: float) -> float:
+    """Return `value`, refusing NaN and the infinities.
+
+    The single home for a guard that was written out five times over (issue
+    #136): twice in `core.payoff` (`aggregate_utility` and
+    `enforcement_share`), once in `core.culture`, and once in each of two
+    `City` properties. Most of those docstrings pointed at `core.culture` as
+    "the same lesson", which is how one rule ended up copied five ways.
+
+    It has to be a **separate** check rather than folded into a range test,
+    because every comparison against NaN is False: `nan < 0`, `nan > 1` and
+    `0 <= nan <= 1` all evaluate False, so a bare range guard waves NaN
+    through and the model runs on garbage (issue #131).
+
+    Args:
+        name: What to call the value in the error message. Use the name the
+            reader would recognise -- a config key like
+            `City.s_grid`, not a local variable.
+        value: The number to check.
+
+    Returns:
+        `value` unchanged, so this can wrap an assignment.
+
+    Raises:
+        ValueError: `value` is NaN, `inf`, or `-inf`.
+
+    Example:
+        ```python
+        grid = require_finite("City.s_grid", float(params["s_grid"]))
+        ```
+    """
+    if not math.isfinite(value):
+        raise ValueError(f"{name} 必须是有限值，收到 {value!r}")
+    return value
+
+
+def require_one_of(name: str, value: str, allowed: Iterable[str]) -> str:
+    """Return `value`, refusing anything outside a closed set of names.
+
+    The third sibling of `require_finite` / `require_unit_interval`, for the
+    other guard this repo had started copying: config keys whose domain is a
+    handful of strings. Three of them now exist (`City.s_grid_level`,
+    `City.s_grid_spread`, `model.network`) and each had written its own
+    `if x not in ALLOWED: raise` — the same drift that produced #131 and #136
+    on the numeric side, one shape at a time.
+
+    Failing loudly matters more here than the tidiness: every one of these
+    switches selects between **mechanisms**, so a typo that silently fell back
+    to a default would produce a complete, plausible set of results for the
+    branch nobody asked for.
+
+    Args:
+        name: What to call the value in the error message. Use the config key
+            a reader would recognise -- `model.network`, not `mode`.
+        value: The string to check.
+        allowed: The permitted values.
+
+    Returns:
+        `value` unchanged, so this can wrap an assignment.
+
+    Raises:
+        ValueError: `value` is not in `allowed`. The message lists the
+            permitted values, because a typo is the likely cause.
+
+    Example:
+        ```python
+        mode = require_one_of("model.network", raw, NETWORK_MODES)
+        ```
+    """
+    options = tuple(allowed)
+    if value not in options:
+        raise ValueError(f"{name} 必须是 {options} 之一，收到 {value!r}")
+    return value
+
+
+def require_unit_interval(name: str, value: float) -> float:
+    """Return `value`, refusing anything outside a finite [0, 1].
+
+    `require_finite`'s sibling for the other guard this repo kept copying: five
+    places wrote `if not 0.0 <= x <= 1.0: raise ValueError(f"… 必须在 [0, 1] …")`
+    by hand, and they had already drifted — some spelled it `x > 1 or x < 0`,
+    which **passes NaN** (every comparison against NaN is False), while the
+    `not 0.0 <= x <= 1.0` spelling **rejects** it. Same intent, opposite
+    behaviour on the one input that matters (issues #131, #136).
+
+    This one is strict on both counts: it calls `require_finite` first, so NaN
+    and the infinities raise before the range test runs.
+
+    Note:
+        Two callers stay deliberately NaN-**permissive** and therefore do *not*
+        use this: `payoff.cobb_douglas` and `payoff.social_standing`. That is
+        the contract `core.culture` is built on — its entry points reject NaN
+        so it never reaches the Cobb-Douglas, and
+        `tests/model/test_culture.py::test_nan_would_otherwise_slip_past_cobb_douglas`
+        pins it. Both sites carry a comment saying so; don't "fix" them here.
+
+    Args:
+        name: What to call the value in the error message. Use the name the
+            reader would recognise -- a config key like `City.s_grid`.
+        value: The number to check.
+
+    Returns:
+        `value` unchanged, so this can wrap an assignment.
+
+    Raises:
+        ValueError: `value` is non-finite, or falls outside [0, 1].
+
+    Example:
+        ```python
+        grid = require_unit_interval("City.s_grid", float(params["s_grid"]))
+        ```
+    """
+    require_finite(name, value)
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} 必须在 [0, 1]，收到 {value!r}")
+    return value

@@ -13,6 +13,8 @@ from loguru import logger
 
 from ..agents.city import City, validate_policy_years
 from ..agents.province import Province
+from ..core.algorithms import require_one_of
+from ..core.network import NETWORK_MODES, isolated_city_ids, load_city_links
 
 ManagerType: TypeAlias = Literal["Province", "City"]
 
@@ -116,6 +118,35 @@ class CWatQIModel(MainModel):
             # `simulate` 实际跑的是配置里的 Soil Moisture Targets（见 #62）。
             irr_method=self.settings.City["irr_method"],
         )
+        self._warn_about_isolated_cities()
+
+    def _warn_about_isolated_cities(self) -> None:
+        """Log which agents the observed network leaves with no friends.
+
+        Isolation is a real property of that data — four agents have it — so it
+        must not be fatal. But it must not be **silent** either: an isolated
+        agent has `s = 1` on both branches, so the social channel is off for it
+        and it never learns from anyone. A reader comparing scenarios deserves
+        to know that from the run log rather than by re-deriving it.
+
+        Does nothing under `within_province`, where every agent has its whole
+        province as friends by construction.
+
+        Raises:
+            ValueError: `model.network` is not one of `NETWORK_MODES`. Checked
+                here so a typo fails during `setup`, with zero file I/O.
+            FileNotFoundError: `observed` is selected but the edge table is
+                missing — also worth hitting at setup rather than a year in.
+        """
+        if self._network_mode() != "observed":
+            return
+        links = load_city_links(str(self.ds.city_network))
+        isolated = isolated_city_ids(links, [city.city_id for city in self.cities])
+        if isolated:
+            logger.warning(
+                f"协作网络下有 {len(isolated)} 个城市没有任何好友，"
+                f"社会通道对它们关闭：{['C%d' % i for i in isolated]}"
+            )
 
     @property
     def provinces(self) -> ActorsList[Province]:
@@ -236,6 +267,71 @@ class CWatQIModel(MainModel):
             return self.provinces.random.choice()
         return self.provinces.select({"name_en": name_en}).item("only")
 
+    def _network_mode(self) -> str:
+        """Read and validate `model.network`.
+
+        A separate method because two callers need it: `setup` checks it before
+        any file is opened, so a typo fails with zero I/O (the same convention
+        as `validate_policy_years`, see #59), and `update_network` reads it
+        every year.
+
+        Returns:
+            The validated mode, one of `NETWORK_MODES`.
+
+        Raises:
+            ValueError: The configured mode is not one of `NETWORK_MODES`.
+                Silently falling back to either branch would be worse than
+                failing: the two are different mechanisms, and a typo would
+                quietly produce results for the one nobody asked for.
+        """
+        return require_one_of(
+            "model.network",
+            str(self.p.get("network", "within_province")),
+            NETWORK_MODES,
+        )
+
+    def update_network(self) -> None:
+        """Rebuild the "friend" network for this year, from the chosen source.
+
+        Dispatches on `model.network`:
+
+        * `within_province` — every pair of cities inside a province is linked
+          with probability `l_p`, which is what `Province.update_graph` has
+          always done. **This branch is bit-identical to the model before the
+          observed network existed**, down to the random numbers: it is the
+          same call in the same order, so the golden fingerprint holds.
+        * `observed` — the collaboration network read from `ds.city_network`.
+          No random numbers are drawn at all, which is itself a difference:
+          `random.link` calls the RNG once per candidate pair even at `p=1.0`,
+          so the two branches cannot be compared draw for draw. They are
+          different mechanisms, not two settings of one.
+
+        Raises:
+            ValueError: `model.network` is not one of `NETWORK_MODES`.
+            FileNotFoundError: `observed` is selected and the edge table is
+                missing.
+
+        Note:
+            Links are re-added every year in both branches. That is harmless —
+            `add_a_link` keeps an existing link in its original position — and
+            it is what the old code did, so the ordering that `City.friends`
+            depends on is unchanged.
+
+        See Also:
+            - `cwatqim.core.network`: the loader, and the three mismatches that
+              come with the observed topology.
+        """
+        mode = self._network_mode()
+        if mode == "within_province":
+            self.provinces.shuffle_do("update_graph", l_p=self.p["l_p"])
+            return
+        links = load_city_links(str(self.ds.city_network))
+        by_id = {city.city_id: city for city in self.cities}
+        for city_id, neighbours in links.items():
+            source = by_id.get(city_id)
+            if source is not None:
+                source.link_friends(by_id.get(n) for n in neighbours)
+
     def step(self) -> None:
         """Execute one simulation time step (one year).
 
@@ -267,7 +363,12 @@ class CWatQIModel(MainModel):
         # preparing parameters
         logger.info(f"Starting a new year: {self.time.year}")
         self.provinces.shuffle_do("update_data")
-        self.provinces.shuffle_do("update_graph", l_p=self.p["l_p"])
+        self.update_network()
+        # 冻结同侪观察集：所有人整年看到的都是同一个 t−1 断面。放在 shuffle_do
+        # 之前是必须的——`decision` 读 `surface_water`，而它在 step 里会被覆盖，
+        # 城市又是乱序推进的（见 issue #72 与 `City.last_decision`）。
+        # 不消耗随机数，所以按固定顺序执行，不用 shuffle_do。
+        self.cities.do("snapshot_decision")
         self.cities.shuffle_do("step")
 
         # 收集数据

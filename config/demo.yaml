@@ -21,6 +21,14 @@ ds:
   cities:
     codes: 'data/sample/city_codes.xlsx'  # City code mapping table
     shp: 'data/sample/YR_cities_sample.shp'  # City boundaries shapefile
+  # Per-city collectivism index; only read when City.s_group_kappa != 0
+  city_collectivism: 'data/sample/city_collectivism.csv'
+  # Province-level cultural tightness aligned to the city agents; only read
+  # when City.s_grid_level != 'national' and City.s_grid_kappa != 0
+  city_tightness: 'data/sample/city_tightness.csv'
+  # Observed collaboration network as City_ID pairs; only read when
+  # model.network = 'observed'
+  city_network: 'data/sample/city_network_edges.csv'
 
   # ======================== Crop Data ========================
   # Water use intensity by crop (mm)
@@ -85,11 +93,16 @@ tracker:
       # === Payoff (see issues #63, #70) ===
       # The ODD+D protocol claims these are collected; none of them were.
       economic_payoff: 'e'  # Economic payoff (RMB): crop revenue minus water cost
+      # Gross revenue (RMB), the yardstick of the social term:
+      # U = e * s. Collected because otherwise the
+      # analysis has to rebuild the price table to back R out of payoff.
+      revenue: 'revenue'
       social_standing: 's'  # Social standing (0-1): 1 = uncriticised, see #60
-      # Both utilities are collected so the analysis can pick later; for what
-      # each means see City.relative_utility's docstring (#70)
-      aggregate_utility: 'payoff'  # the quantity agents actually maximise
-      relative_utility: 'relative_utility'  # normalised utility [0, 1], diagnostic
+      aggregate_utility: 'payoff'  # what agents maximise: U = e * s
+      # What social learning actually compares: utility per unit of gross
+      # revenue. Comparing absolute payoff degenerates into "imitate the
+      # biggest city", selecting traits by irrigated area (see #110).
+      unit_payoff: 'unit_payoff'
       # The two below are min-max normalisations within the friend set, not
       # ordinal ranks; the social one saturates (a tied province reports all
       # 1.0), so never read 1.0 as "best" (#70)
@@ -109,12 +122,50 @@ tracker:
       vengefulness: 'vengefulness'  # Vengefulness level
 
 time:
-  start: '1980'
-  end: '2010'
+  # One year earlier than the analysis window: the **first simulated year is
+  # spin-up and is always dropped on the analysis side** (see issue #205 and
+  # `water_quota_analysis.runs.drop_spinup`).
+  #
+  # ABSESpy advances the clock before the first step, so `start: '1979'` makes
+  # 1980 the first simulated year and 2012 (the `end` year) the last. Dropping
+  # 1980 leaves a 1981-2012 analysis window (33 simulated years).
+  #
+  # Why the window ends in 2012: the study period stops just before the
+  # "strictest water resources management" system, which changed the
+  # administrative incentives prefecture-level agencies face and which the model
+  # does not represent.
+  #
+  # Why the first year has to go: payoffs need the crop yield that the previous
+  # step wrote into `_results`, and in the first year that table is still empty,
+  # so `crop_yield` is None and `payoff` silently returns minus the water cost.
+  # The first year therefore has `revenue == 0`, `economic_payoff < 0` and a
+  # social term `-lambda*R*(1-s) == 0` for every city and every run: the
+  # objective degenerates into "minimise the water bill", whose optimum is the
+  # non-compliant corner, and `change_mind` copies traits from it.
+  #
+  # The upper bound is a data limit too: climate runs to 2018-12-31, but
+  # `quotas.csv` and `irr_intensity.csv` both stop at 2013, and the
+  # water-saving-irrigation statistics break between 2012 and 2013. 2012 is the
+  # last year that is safe on both sides.
+  start: '1979'
+  end: '2012'
   years: 1
   policy_year: 1998
 
 model:
+  # Where the "friend" network comes from. Both the social term and social
+  # learning run over `City.friends`, so this key swaps a **mechanism**, not a
+  # parameter:
+  #   within_province -- link pairs inside a province with probability `l_p`
+  #                      (current default; l_p=1.0 means a clique per province
+  #                      and no cross-province edge at all).
+  #   observed        -- the observed cross-regional collaboration network,
+  #                      read from `ds.city_network`.
+  # Switching to `observed` also accepts three mismatches (coverage, time
+  # window, topology) documented in `cwatqim.core.network`. Note the two
+  # branches cannot be compared draw for draw: `random.link` consumes one
+  # random number per candidate pair even at p=1.0, `observed` consumes none.
+  network: within_province
   l_p: 1.0
 
 Province:  # ABSESpy finds parameters by class name, so use capitalized first letter
@@ -150,12 +201,99 @@ Province:  # ABSESpy finds parameters by class name, so use capitalized first le
 
 City:  # ABSESpy finds parameters by class name, so use capitalized first letter
   mutation_rate: 0.05
-  s_enforcement_cost: 0.26  # Grid = 1 - S-enforcement-cost
-  s_reputation: 0.55  # Group = S-reputation
+  # `payoff_floor` 已于 2026-09-01 删除（#213）。它把效用变成 `max(e, floor)·s`，
+  # 为的是掰正亏损年 `e<0` 时社会项反号（#121）；代价是 `e <= floor` 时目标函数
+  # 在整个可行域上恒定，12.5% 的城市-年因此没有配水解、只有求解器任取的一点。
+  # 现在回到 `U = e·s`，反号**有意保留**：经济上本来就是负激励的那一格，社会项
+  # 转成奖励是可接受的读法。完整论证见 `core.payoff.aggregate_utility`。
+  # `grid` is the source's Grid: **how far rules are externally imposed**.
+  # Low Grid -- the rules are nobody's business but your own, so reporting a
+  # neighbour is a personal betrayal that earns you the informer's name: costly,
+  # and `grid^m` decays fast. High Grid -- roles and rules come from outside the
+  # individual, reporting is merely doing your part, no stigma, `grid^m` stays
+  # near 1. A high-Grid society follows norms strictly and is more willing to
+  # punish breaches even with no direct benefit to the punisher.
+  # So `grid` is the share of goodwill that **survives** each report filed:
+  # `m` reports leave `grid^m`, and one report costs `1 - grid = 0.61`. The
+  # config value is the source's symbol used as it is -- the only `1 -` in the
+  # whole social term is the one on `group` inside `social_standing` (#210).
+  #
+  # It has exactly **one** route into behaviour under t-1 eligibility, and its
+  # sign is unambiguous (derivation and measurements in issue #209):
+  #
+  #   Enforcement rate: the threshold `v > 1 - grid` with `vengefulness ~ U(0,1)`
+  #   makes the share of eligible agents who report exactly `grid = 0.39`. A
+  #   larger `grid` means cheaper reporting, more critics, a *stronger* deterrent.
+  #
+  # The compliant branch's `grid^m` is not a second route: eligibility reads the
+  # **realised** decision of year t-1, so `m` is the same on both branches and
+  # `grid^m` cancels out of the ratio. The deterrent is therefore
+  # `(1 - group)^(-c)`, always >= 1.
+  #
+  # Value = the WVS `Grid score` column min-max scaled across the 60 countries,
+  # China's entry (#211): `(0.56 - 0.40) / (0.81 - 0.40) = 0.390`. The scaling is
+  # required -- the column spans 0.40-0.81 while eq. (3) needs shares. Its single
+  # definition is `cwatqim.core.culture.scale_wvs_column`, pinned by
+  # `tests/test_configs.py`.
+  #
+  # NOTE -- before 2026-08-31 this held the **unscaled** 0.56 while
+  # `culture_comparison.ipynb` plotted the scaled value, so the config and the
+  # figures were on different rulers (#211). That also retires the old
+  # "invert or not" argument (#101 / #102 / #126): min-max is monotone, China's
+  # within-column percentile (16.7%) is unchanged, and `WVS_GRID_IS_INVERTED` is
+  # deleted.
+  s_grid: 0.39
+  # `group` is the source's Group: **how far the individual is embedded in the
+  # collective**. Low Group -- everyone minds their own business, being caught
+  # barely hurts. High Group -- individual and collective interests overlap
+  # heavily, so being *seen* to breach is enormously costly. So `group` is the
+  # share of standing **lost** to each criticism, the national scalar and the
+  # `group_bar` baseline. It enters `social_standing` as `(1 - group)^n` -- the
+  # model's single complement -- so one critic multiplies the deterrent by
+  # `1 / (1 - group) = 1.89`.
+  #
+  # Same conversion as `grid` (#211): the `Group score` column min-max scaled
+  # across the 60 countries, China's entry
+  # `(0.53 - 0.46) / (0.61 - 0.46) = 0.467`. Do not mix sources: the two files'
+  # Group columns correlate only r=+0.59 (R^2=0.35), so they are not two scalings
+  # of the same measurement (issue #102).
+  s_group: 0.47
+  # Per-city culture: group_i = clip(group_bar + kappa * z_i, eps, 1 - eps),
+  # with z from `ds.city_collectivism`. kappa = 0 falls back to the national
+  # scalar *exactly*: no file read, no change to the RNG stream.
+  s_group_kappa: 0.0
+  s_group_wave: 2000  # Census wave used as the fixed cross-section
+  # Per-city Grid: grid_i = clip(grid_bar + kappa_grid * t_i, eps, 1 - eps),
+  # with t from `ds.city_tightness` (province-level cultural tightness).
+  # Resolution switch, which the Group side does not need because tightness is
+  # only measured per province:
+  #   national   -- the national scalar; bit-identical to the model before
+  #                 tightness was wired in (no file read, no RNG change)
+  #   province   -- one value per province
+  #   prefecture -- province value plus a draw from that province's own
+  #                 standard error
+  s_grid_level: national
+  # The sign of kappa_grid is positive and it is an identity, not a convention:
+  # `enforcement_share` is the closed form `share = grid`, so grid *is* the
+  # fraction of eligible neighbours that sanction a defector -- which is what
+  # the second half of the tightness definition measures. See the Notes on
+  # `cwatqim.core.culture.grid_from_tightness`.
+  #
+  # This demo ships with the switch OFF (`national` + 0.0) so that it stays
+  # self-contained, exactly as `s_group_kappa` does. The research config
+  # (`config/config.yaml`) runs `province` + 0.10; the divergence is deliberate
+  # and recorded in `tests/test_configs.py::DELIBERATE_DIVERGENCES`.
+  s_grid_kappa: 0.0
+  # Dispersion used by the prefecture draw: `se` (uncertainty of the province
+  # mean, default) or `sd` (between-respondent spread, ~19x larger).
+  s_grid_spread: se
+  # Seed of the private generator used for that draw. It never touches the
+  # model's own RNG stream, so sweeping it leaves everything else comparable.
+  s_grid_draw_seed: 0
   # forced_since / include_s_since come from the `scenario` config group (#71)
   # AquaCrop irrigation strategy: 1 = soil moisture targets (SMT)
   irr_method: 1
   # AquaCrop AppEff (%): field application efficiency, the second of the two
   # efficiency layers. See `City.simulate` for how AquaCrop applies it (#62).
-  irr_eff: 50
+  irr_eff: 90
   SMT: [80, 80, 80, 80]  # Soil moisture thresholds

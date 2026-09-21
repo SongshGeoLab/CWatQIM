@@ -30,8 +30,8 @@ Example:
     from cwatqim import CWatQIModel
     from hydra import compose, initialize
 
-    with initialize(config_path="config"):
-        cfg = compose(config_name="config")
+    with initialize(config_path="config", version_base=None):
+        cfg = compose(config_name="demo")
         model = CWatQIModel(parameters=cfg)
         model.setup()
         for _ in range(10):

@@ -13,9 +13,14 @@ payoffs, including:
     - Water costs
     - Social standing retained under peer criticism
     - Combined economic and social payoffs
+    - The peer-enforcement rule (`reports_defector`) and the population share
+      it implies (`enforcement_share`)
 
 These functions are used by City agents to evaluate different water use
-strategies and make optimal decisions.
+strategies and make optimal decisions. The last pair lives here rather than
+in the agent because `water_quota_analysis` draws the enforcement curve from
+the very same definition -- two copies of a decision rule drift silently
+(issue #129).
 
 Note:
     The social term is a **multiplier on the payoff**, not a cost to
@@ -28,7 +33,7 @@ from typing import Any, Optional, Tuple
 
 import pandas as pd
 
-from .algorithms import DictLikeType, squeeze
+from .algorithms import DictLikeType, require_finite, require_unit_interval, squeeze
 from .data_loaders import WaterUnitType, convert_mm_to_m3
 
 
@@ -43,8 +48,12 @@ def cobb_douglas(parameter: float, times: int) -> float:
     Formula:
         f(parameter, times) = (1 - parameter) ** times
 
-    Used twice in the social term of the payoff — once for standing lost to
-    neighbours' criticism, once for the goodwill spent criticising them.
+    This is the `(1 - group)^n` half of the social term (`social_standing`) --
+    the only complement **inside the social term**. The other half, `grid^m`, is
+    a plain power: `grid` is already a surviving share, so it needs no `1 -`
+    (issue #210). Outside the social term one more complement is legitimate and
+    unavoidable: `reports_defector` compares vengefulness against the *cost* of
+    a report, `1 - grid`.
 
     Args:
         parameter: Per-occurrence loss rate in range [0, 1]. Higher values
@@ -74,68 +83,173 @@ def cobb_douglas(parameter: float, times: int) -> float:
         Read the value as a multiplier on the payoff, never as a cost to
         subtract — the sign was documented backwards until issue #60.
     """
+    # 刻意**不**走 `algorithms.require_unit_interval`：这个写法对 NaN 放行，而
+    # `core.culture` 的整套设计就建立在"NaN 在入口被拦下、到不了这里"之上
+    # （见那边的 Note 与 `test_nan_would_otherwise_slip_past_cobb_douglas`）。
     if parameter > 1 or parameter < 0:
         raise ValueError("Parameter should be between 0 and 1.")
     return (1 - parameter) ** times
 
 
 def social_standing(
-    cost: float, reputation: float, caught_times: int, punish_times: int
+    grid: float, group: float, caught_times: int, punish_times: int
 ) -> float:
     """Social standing an agent **retains**, as a multiplier on its payoff.
 
-    Two mechanisms erode standing, each decaying multiplicatively via
-    `cobb_douglas`:
-        1. **Reputation**: eroded by every neighbour who criticises this
-           agent's over-withdrawal.
-        2. **Enforcement**: eroded by every neighbour this agent criticises --
-           reporting a peer is not free.
+    This is equation (3) of the Supplementary Methods of Castilla-Rho et al.
+    (2017, *Nature Human Behaviour*), p. 26:
 
-    The result is the average of the two surviving shares.
+        S = grid^m * (1 - group)^n
 
-    Formula:
-        s = [ (1 - cost)^punish_times + (1 - reputation)^caught_times ] / 2
+    with `m` the number of times the agent reports a non-compliant neighbour
+    (`punish_times`) and `n` the number of times it is caught extracting water
+    illegally (`caught_times`). Both counts are per season -- the source assumes
+    "agents have no memory of past decisions" (SI II.ii.g).
+
+    **The config values are the source's symbols, used as they are.** `grid` is
+    `City.s_grid` and `group` is `City.s_group`, both read straight off the
+    World Values Survey columns (issue #102). The `1 -` written above, on
+    `group`, is the **only** complement anywhere in the social term: no other
+    function in the model or in `water_quota_analysis` complements either
+    parameter, and none should be added (issue #210).
+
+    The two bases run in opposite directions, which is the source's design.
+    Grid-Group cultural theory gives each of them a reading, and the reading is
+    what fixes the direction -- not the arithmetic:
+
+    * **Grid = how far rules are externally imposed.** Under low Grid the rules
+      are nobody's business but your own ("who are you to police me?"), so
+      reporting a neighbour is a personal betrayal that earns you the informer's
+      name: it costs a lot, and `grid^m` decays fast. Under high Grid roles and
+      rules come from outside the individual, so reporting is merely doing your
+      part -- no stigma, `grid^m` stays near 1. A high-Grid society follows
+      social norms strictly and is *more* willing to punish breaches of them
+      even with no direct benefit to the punisher. `grid` is therefore the share
+      of goodwill that **survives** each report filed, and one report costs
+      `1 - grid` -- which is exactly the threshold `reports_defector` compares
+      vengefulness against.
+    * **Group = how far the individual is embedded in the collective.** Under
+      low Group everyone minds their own business and what others think does not
+      bite, so being caught barely hurts. Under high Group individual and
+      collective interests overlap heavily, so being *seen* by the collective to
+      breach is enormously costly. `group` is therefore the share of standing
+      **lost** to each criticism, and `n` criticisms leave `(1 - group)^n`.
+
+    At the calibrated `grid = 0.39`, `group = 0.47` (the WVS columns min-max
+    scaled across 60 countries, China's entry -- see
+    `core.culture.scale_wvs_column` and issue #211) the term is
+    `S = 0.39^m * 0.53^n`, so a single critic multiplies the deterrent by
+    `1 / (1 - group) = 1.89`.
 
     Args:
-        cost: Per-report goodwill lost when criticising a neighbour, in
-            [0, 1] (the `City` parameter `s_enforcement_cost`).
-        reputation: Per-criticism standing lost when caught, in [0, 1]
-            (the `City` parameter `s_reputation`).
-        caught_times: Number of neighbours criticising this agent.
-        punish_times: Number of neighbours this agent criticises.
+        grid: `City.s_grid`, in [0, 1]. Goodwill surviving one report.
+        group: `City.s_group`, in [0, 1]. Standing lost to one criticism.
+        caught_times: `n`, neighbours criticising this agent.
+        punish_times: `m`, neighbours this agent criticises.
 
     Returns:
-        Retained standing in range [0, 1], where:
-            - 1.0: nobody criticised, and nobody was criticised (best case)
-            - 0.0: standing entirely eroded (worst case)
+        Retained standing in [0, 1]. 1.0 when both counts are 0.
+
+    Raises:
+        ValueError: `grid` or `group` falls outside [0, 1].
+
+    See Also:
+        - `water_quota_analysis.analysis.social_cost`: the closed forms for the
+          two branches, and the deterrent ratio built on them.
+    """
+    # 与 `cobb_douglas` 同一条约定：对 NaN 放行，由 `core.culture` 的入口负责拦。
+    if grid > 1 or grid < 0:
+        raise ValueError("Parameter should be between 0 and 1.")
+    goodwill_left = grid**punish_times
+    reputation_left = cobb_douglas(group, caught_times)
+    return goodwill_left * reputation_left
+
+
+def reports_defector(vengefulness: float, grid: float) -> bool:
+    """Whether an eligible agent criticises a defecting neighbour.
+
+    The single definition of the reporting rule. Filing a report burns
+    `1 - grid` of the goodwill an agent still holds -- `grid` being the share
+    that survives it -- so an agent files only when the norm matters to it more
+    than the report costs:
+
+        report  iff  v > 1 - grid
+
+    The threshold is flat in the number of reports already filed, so
+    enforcement is all-or-nothing per agent; the derivation is spelled out in
+    `cwatqim.agents.city.City.will_report`, which is the only caller that
+    supplies eligibility (an agent that defected last year cannot criticise).
+
+    Args:
+        vengefulness: How much the agent cares about the norm, in [0, 1].
+        grid: Goodwill surviving one report, in [0, 1] (the `City` parameter
+            `s_grid`). The report's cost is its complement.
+
+    Returns:
+        True if the agent files a report.
+
+    Note:
+        Validates nothing on purpose: this runs once per agent per neighbour
+        per year, and both inputs are already guarded upstream --
+        `grid` by the `City.s_grid` property and `vengefulness` by its
+        `U(0, 1)` initialisation. Be aware that a NaN slipping through would
+        return False silently, since `nan > x` is False; that is why the guard
+        sits on the property rather than here.
 
     Example:
         ```python
-        # Nothing has happened yet: standing is intact
-        social_standing(cost=0.5, reputation=0.8, caught_times=0, punish_times=0)
-        # -> 1.0
-
-        # Criticised by three neighbours, criticised one in turn
-        social_standing(cost=0.5, reputation=0.8, caught_times=3, punish_times=1)
-        # -> (0.5 ** 1 + 0.2 ** 3) / 2 = 0.254
+        reports_defector(0.9, 0.56)   # -> True
+        reports_defector(0.3, 0.56)   # -> False
         ```
 
-    Note:
-        Both the old name (`lost_reputation`) and its docstring described the
-        **complement** of what the arithmetic returns (see issue #60). The
-        direction matters: `City.agg_payoff` computes `payoff = e * s`, so a
-        value near 0 is the punishment and a value near 1 is the intact case.
-        Writing it up as a cost to subtract would invert the mechanism.
+    See Also:
+        - `cwatqim.core.payoff.enforcement_share`: the population share this
+          rule implies
+        - `cwatqim.agents.city.City.will_report`: the eligibility wrapper
+    """
+    return vengefulness > 1.0 - grid
+
+
+def enforcement_share(grid: float) -> float:
+    """Share of eligible agents that enforce, under `v ~ U(0, 1)`.
+
+    The measure of `{v : reports_defector(v, grid)}` when vengefulness is
+    uniform on the unit interval, which is how `City` initialises it.
+
+    Be honest about what this is: `grid` is the **closed form** of that
+    measure, not something computed from the rule, so the two could in
+    principle drift apart. What stops them is a test rather than the code --
+    `tests/model/test_payoff.py::TestEnforcementRule` evaluates
+    `reports_defector` on a dense grid of the unit interval and compares the
+    empirical share against this function. Change the rule without changing
+    this and the suite goes red, instead of a figure quietly disagreeing with
+    the model (issue #129).
+
+    Direction: the cheaper enforcement is -- the more goodwill survives a
+    report, i.e. the higher `grid` -- the more of it happens, and the stronger
+    the deterrent (issue #109). Under the pre-#210 reading this share was
+    `1 - beta_1`; the parameter is now the source's `grid` itself, so the
+    complement is gone from both the rule and this closed form.
+
+    Args:
+        grid: `City.s_grid`, in [0, 1].
+
+    Returns:
+        The fraction of eligible agents that file a report: `grid`.
+
+    Raises:
+        ValueError: `grid` is not finite or falls outside [0, 1].
+
+    Example:
+        ```python
+        enforcement_share(0.39)   # the calibrated value for China
+        # -> 0.39
+        ```
 
     See Also:
-        - `cwatqim.core.payoff.cobb_douglas`: Underlying decay function
-        - `cwatqim.agents.city.City.calc_social_standing`: Method using it
+        - `cwatqim.core.payoff.reports_defector`: the rule itself
     """
-    # what survives of this agent's reputation after neighbours criticised it
-    reputation_left = cobb_douglas(reputation, caught_times)
-    # what survives of its goodwill after it criticised neighbours in turn
-    goodwill_left = cobb_douglas(cost, punish_times)
-    return (goodwill_left + reputation_left) / 2
+    return require_unit_interval("grid", grid)
 
 
 _DEPRECATED_NAMES = {
@@ -465,17 +579,127 @@ def economic_payoff(
         - `cwatqim.agents.city.water_withdraw`: Optimization using this function
     """
     costs = water_costs(q_surface, q_ground, water_prices, unit=unit, area=area)
-    # 如果没有作物产量（纯成本情景），直接返回负的水费
+    reward = gross_revenue(crop_yield, crop_prices, area)
+    # 没有作物产量时 `gross_revenue` 返回 0.0，于是这里退回"纯成本情景"
+    return round(reward - costs, 2)
+
+
+def gross_revenue(
+    crop_yield: Optional[float] = None,  # t/ha
+    crop_prices: Optional[DictLikeType] = 1.0,  # RMB/t
+    area: float = 1.0,  # ha
+) -> float:
+    """卖掉全部收成能拿到的钱，不扣任何成本。
+
+    `economic_payoff` 的被减数。它**不进效用**（乘性形式 `U = e·s` 没有标尺），
+    单独拿出来是因为分析侧要用它把经济诱惑与威慑放到同一根轴上；2026-08-20 到
+    08-30 之间的加性效用曾拿它当社会项的标尺，那段已撤销（见 issue #121）。
+
+    只有一处实现，`economic_payoff` 与 `City.calc_payoff` 都调它——两边各算一遍
+    迟早会漂移。
+
+    Args:
+        crop_yield: 单产（t/ha）。None 表示还没有收成（例如第一个模拟年，
+            `_results` 还是空表），此时返回 0.0。
+        crop_prices: 作物价（RMB/t）。
+        area: 灌溉面积（ha）。
+
+    Returns:
+        毛收入（RMB），恒 ≥ 0。没有收成时为 0.0。
+
+    Raises:
+        ValueError: 给了产量却没给价格。静默降级成 0 会让优化目标悄悄丢掉作物
+            收益（见 issue #15）。
+
+    Example:
+        ```python
+        gross_revenue(5.0, 2000.0, area=100.0)  # 5 t/ha x 2000 RMB/t x 100 ha
+        # -> 1_000_000.0
+        ```
+
+    See Also:
+        - `cwatqim.core.payoff.crops_reward`: 逐作物求和的实现
+        - `cwatqim.core.payoff.aggregate_utility`: 用它当社会项的标尺
+    """
     if crop_yield is None:
-        return -round(costs, 2)
-    # 有产量却没有价格，说明调用方漏传了参数：静默降级成"只算水费"会让
-    # 优化目标悄悄丢掉作物收益（见 issue #15），因此这里必须报错。
+        return 0.0
     if crop_prices is None:
         raise ValueError(
             "`crop_prices` is None while `crop_yield` is given: "
             "cannot value the harvest. Pass crop prices explicitly, "
             "or set `crop_yield=None` for a water-cost-only payoff."
         )
-    # 否则计算作物收益，减去水费
-    reward = crops_reward(crop_yield, crop_prices, area)
-    return round(reward - costs, 2)
+    return crops_reward(crop_yield, crop_prices, area)
+
+
+def aggregate_utility(economic: float, standing: float) -> float:
+    """主体真正最大化的量：经济收益按保留下来的社会地位打折。
+
+    Formula:
+        U = e · s
+
+    其中 `s ∈ [0,1]` 是**保留下来**的社会地位（1 = 无人批评，方向见 issue #60）。
+    社会项是**乘数**而不是减项：被批评把收益整体打折，折扣的深浅由 group 与批评
+    人数决定。
+
+    ## 亏损年社会项会反号，而这是**有意保留**的（2026-09-01，作者决定）
+
+    `e < 0` 时 `e·s` 反号：被批评（`s` 变小）反而让 `U` 变大（更接近 0），威慑在
+    那一格变成奖励（issue #121）。实测 `e < 0` 占约 12.5% 的城市-年，是真实的亏损
+    年（水费盖过作物收入），不是脏数据。
+
+    读法是**经济上本来就是负激励的那一格，社会项转成奖励是可接受的**：亏损年里
+    继续种、继续抽水本身已经被经济惩罚了，社会评价不必在那里再叠一层同向的压力。
+
+    ### 为什么不用 `payoff_floor` 去掰正
+
+    2026-08-30 至 09-01 之间这里写的是 `U = max(e, floor) · s`，`floor` 是一个很小
+    的正下限，为的就是让方向处处为正。它有一个**致命的副作用**，直到换 canonical
+    才暴露（issue #213）：`e ≤ floor` 时 `max(e, floor)` 恒为 `floor`，于是
+
+        U = floor · s
+
+    **与配水完全无关**——同一支内部 `s` 是常数、`floor` 也是常数，目标函数在整个
+    可行域上是一条水平线，argmax 退化，解由求解器任取。实测 12.5% 的城市-年因此
+    落在 `surface = 0`，既污染一切以地表水为分母的指标（#214），又让 #94 那条
+    「配水解是角点解」在 13% 的样本上不成立（1.0000 → 0.8742）。
+
+    那 12.5% 不是"方向反了的结果"，是"根本没有结果"。**反号是个可以讨论的读法，
+    退化是个没有解的洞** —— 两害相权，取反号。
+
+    Args:
+        economic: 经济收益 e（RMB），可正可负。
+        standing: 保留下来的社会地位 s，必须在 [0, 1]；`social_standing` 的产物。
+
+    Returns:
+        效用 U（RMB）。`e < 0` 时它同样为负，且随 `s` 变小而**上升** —— 见上。
+
+    Raises:
+        ValueError: 任一入参非有限（NaN / ±inf），或 `standing` 越界。
+            非有限值必须**显式**拒绝：`nan < 0` 是 False，NaN 会原样穿过区间守卫，
+            效用变成 NaN，而 `change_mind` 里 `nan > x` 恒为 False —— 主体从此
+            静默地再也学不到东西，全程无异常（同一教训见 `core.culture`）。
+
+    Example:
+        ```python
+        # 正常年份：被批评越多，效用越低
+        aggregate_utility(economic=4e6, standing=1.0)   # -> 4e6
+        aggregate_utility(economic=4e6, standing=0.5)   # -> 2e6
+
+        # 亏损年：方向反过来，被批评反而"更好" —— 有意保留，见上
+        aggregate_utility(economic=-4e6, standing=1.0)  # -> -4e6
+        aggregate_utility(economic=-4e6, standing=0.5)  # -> -2e6
+        ```
+
+    Note:
+        `include_s` 为假时 `City.agg_payoff` **不**走这里，直接返回 `e` —— 没有乘法
+        就不该动经济收益，否则 `never` 情景会跟着动，而它逐位不变正是一条有用的
+        一致性检验。
+
+    See Also:
+        - `cwatqim.core.payoff.social_standing`: 产出 `standing`
+        - `cwatqim.agents.city.City.agg_payoff`: 调用点
+    """
+    require_finite("经济收益", economic)
+    require_unit_interval("社会地位", standing)
+    return economic * standing

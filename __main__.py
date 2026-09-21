@@ -5,13 +5,38 @@
 # GitHub   : https://github.com/SongshGeo
 # Website: https://cv.songshgeo.com/
 
+import sys
 
-import hydra
-from abses import Experiment
-from loguru import logger
-from omegaconf import DictConfig, OmegaConf
+# —— 这段必须在任何会拉起 aquacrop 的 import 之前跑（见 #103）——
+#
+# `aquacrop/__init__.py` 开头是 `if not '-m' in sys.argv:` 才导出自己的符号，
+# 而那是对整个 argv 的**逐元素**匹配。Hydra 的 multirun 短选项恰好就是 `-m`，
+# 于是 `python -m cwatqim -m scenario=a,b` 里用户那个 `-m` 被 aquacrop 当成
+# "我是被 python -m aquacrop 调起来的"，直接跳过全部导出，最后崩在一个与
+# 命令行毫不相干的 `ImportError: cannot import name 'Crop'`。
+# （`--multirun` 不会触发：它不等于 `-m`，粘在一起的 `-mn` 之类也不会。）
+#
+# `__name__` 那个条件是必需的：本模块会被 `tests/model/test_main.py` 直接
+# import，而 `pytest -m "not slow"` 这类命令的 argv 里同样有裸 `-m`——少了它，
+# 光是 import 就会 SystemExit。只有真的 `python -m cwatqim` 时才拦。
+#
+# `argv[0]` 不必排除：runpy 在 `__main__.py` 执行前就把它换成文件路径了
+# （`tests/model/test_main.py` 里记着这件事）。切掉 `[0]` 只是稳妥，不是必需。
+if __name__ == "__main__" and "-m" in sys.argv[1:]:
+    raise SystemExit(
+        "cwatqim: 请把 `-m` 换成 `--multirun`。\n\n"
+        "  python -m cwatqim --multirun scenario=baseline,strict ...\n\n"
+        "aquacrop 会把命令行里任何位置的裸 `-m` 当作自己被 `python -m aquacrop` "
+        "调起，从而跳过全部符号导出；继续跑下去只会得到一个看不出原因的 "
+        "`ImportError: cannot import name 'Crop'`（见 issue #103）。"
+    )
 
-from cwatqim.model.main import CWatQIModel
+import hydra  # noqa: E402
+from abses import Experiment  # noqa: E402
+from loguru import logger  # noqa: E402
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
+
+from cwatqim.model.main import CWatQIModel  # noqa: E402
 
 
 class SeededExperiment(Experiment):
@@ -81,6 +106,13 @@ def run_abm(cfg: DictConfig | None = None) -> None:
         ```bash
         python -m cwatqim exp.repeats=10 exp.num_process=4
         python -m cwatqim config_name=demo time.start=1985 time.end=1990
+        ```
+
+        Multi-run sweeps must use the **long** flag `--multirun`; the short
+        `-m` makes aquacrop skip its exports and the run dies at import time
+        with a misleading `ImportError` (see issue #103):
+        ```bash
+        python -m cwatqim --multirun scenario=baseline,never,strict
         ```
 
     Note:
