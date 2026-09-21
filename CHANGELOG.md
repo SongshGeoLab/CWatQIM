@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.2.0...v0.3.0) (2026-09-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **model:** 社会项换回乘性式(3)，参数正名 grid/group
+* **config:** :boom: AppEff 50 -> 90，canonical 换成 multirun/appeff_090（#62、#95、#64）
+* **config:** :boom: 情景组单源化，仓库内那份副本删除（#79）
+* **cwatqim:** `s_enforcement_cost` 0.74 -> 0.56、`s_reputation` 0.55 -> 0.53， `WVS_GRID_IS_INVERTED` 语义反转，`load_countries` 改为单一来源（去掉 `results` 形参 与 `grid_alt`/`group_alt` 两列——它们从未被消费）。模型输出会变，需全量重跑。
+* **cwatqim:** `City.step` 的社会学习指标由 `payoff` 改为 `unit_payoff`。
+* **cwatqim:** `City.hate_a_behave(behave, draw)` 换成 `City.will_report(behave)`； `City.draw_judgements` 删除；`CWatQIModel.step` 新增一次 `snapshot_decision` 广播。
+* **cwatqim:** `City.water_withdraw` 去掉 `ga_kwargs`、新增 `kink`； `optimize_surface_share` 更名为 `solve_surface_share` 且不再接受 rng。
+* **cwatqim:** `City.agg_payoff` 新增必填参数 `revenue`；效用的函数形式改变， 所有含社会项的结果都会移动。
+* **cwatqim:** :boom: β₁ 按 #101 翻转，s_enforcement_cost 0.26 -> 0.74
+
+### Features
+
+* **analysis:** :sparkles: 把地级市集体主义指数对齐到 59 个城市主体 ([e80aeac](https://github.com/SongshGeoLab/yr-water-quota/commit/e80aeac463976a7d95241b562a2c203d6f0c7bf2))
+* **config:** :boom: AppEff 50 -&gt; 90，canonical 换成 multirun/appeff_090（[#62](https://github.com/SongshGeoLab/yr-water-quota/issues/62)、[#95](https://github.com/SongshGeoLab/yr-water-quota/issues/95)、[#64](https://github.com/SongshGeoLab/yr-water-quota/issues/64)） ([45e35b8](https://github.com/SongshGeoLab/yr-water-quota/commit/45e35b8baea90d7225bbd1e9a4188df5fb907684))
+* **config:** :chart_with_upwards_trend: λ 由扫描定为 0.5，并记下"社会项现在推得动模型" ([f7fa6cf](https://github.com/SongshGeoLab/yr-water-quota/commit/f7fa6cfff2da489e8c1550523b2d29a205aca589))
+* **cwatqim:** :boom: β₁ 按 [#101](https://github.com/SongshGeoLab/yr-water-quota/issues/101) 翻转，s_enforcement_cost 0.26 -&gt; 0.74 ([042cab4](https://github.com/SongshGeoLab/yr-water-quota/commit/042cab4ca29a1767a36fa3cf988bf0b6648464cb))
+* **cwatqim:** :boom: β₁ 换源并撤销 [#101](https://github.com/SongshGeoLab/yr-water-quota/issues/101) 的翻转，0.74 -&gt; 0.56（[#102](https://github.com/SongshGeoLab/yr-water-quota/issues/102)、[#126](https://github.com/SongshGeoLab/yr-water-quota/issues/126)） ([beaefaa](https://github.com/SongshGeoLab/yr-water-quota/commit/beaefaa09886dafe6d22dce3efa637294f749802))
+* **cwatqim:** :boom: 批评改成决策，β₁ 接到执法的外延边际上（[#110](https://github.com/SongshGeoLab/yr-water-quota/issues/110)、[#72](https://github.com/SongshGeoLab/yr-water-quota/issues/72)） ([592e3db](https://github.com/SongshGeoLab/yr-water-quota/commit/592e3db5acf0d46d3c7cab99b47c29dc6bee5473))
+* **cwatqim:** :boom: 效用改成加性 U = e − λ·R·(1−s)，社会项的幅度进决策 ([fa37e68](https://github.com/SongshGeoLab/yr-water-quota/commit/fa37e680083049876309df10bf2e77a0be133bc1))
+* **cwatqim:** :boom: 社会学习改比单位毛收入的效用，性状不再按城市规模选择 ([b959666](https://github.com/SongshGeoLab/yr-water-quota/commit/b9596660988680fdac3b10ba952caf2e6499966f)), closes [#110](https://github.com/SongshGeoLab/yr-water-quota/issues/110)
+* **cwatqim:** :sparkles: Group 参数逐城取值，κ=0 时逐位退回全国标量 ([dfc8192](https://github.com/SongshGeoLab/yr-water-quota/commit/dfc8192308d46fba7897842c49ac8635ccf82d2f))
+* **cwatqim:** :sparkles: 给已删除的公开 API 补垫片与去向说明（[#130](https://github.com/SongshGeoLab/yr-water-quota/issues/130)） ([3c54ce9](https://github.com/SongshGeoLab/yr-water-quota/commit/3c54ce901257664a50550e8ed90ff4907b40ea02))
+* 地级市集体主义指数——数据管道、逐城 β₂、描述性对比与外部检验 ([61bb53a](https://github.com/SongshGeoLab/yr-water-quota/commit/61bb53a92ff05bb3b72313f903485eceb618fee4))
+* 文化参数下沉到省级、协作网络可接入，并换 canonical（[#220](https://github.com/SongshGeoLab/yr-water-quota/issues/220)、[#139](https://github.com/SongshGeoLab/yr-water-quota/issues/139)） ([70bfb13](https://github.com/SongshGeoLab/yr-water-quota/commit/70bfb13fa8ba7e7964f5e22105011863771bc25e))
+
+
+### Bug Fixes
+
+* **analysis:** :bug: 两轴代码审查的修复：崩溃的 CLI、缺失的行数守卫、文档欠账 ([de3c03e](https://github.com/SongshGeoLab/yr-water-quota/commit/de3c03e3d08a7a7f91f29765450808a6fdc9cfc1))
+* **analysis:** :bug: 意图列配对前强制对齐，对不齐就报错（[#120](https://github.com/SongshGeoLab/yr-water-quota/issues/120)） ([b40e706](https://github.com/SongshGeoLab/yr-water-quota/commit/b40e706e6e2907f9534d90137c66cc569f07dc41))
+* **cwatqim:** :bug: 三处守卫拦不住 NaN，会让主体静默地再也学不到东西 ([e5ab7d3](https://github.com/SongshGeoLab/yr-water-quota/commit/e5ab7d3f206778a00748c531cf9541bf7f92f317))
+* **cwatqim:** :bug: 手滑写 `-m` 时当场说人话，而不是崩在 aquacrop 的 ImportError（[#103](https://github.com/SongshGeoLab/yr-water-quota/issues/103)） ([719738d](https://github.com/SongshGeoLab/yr-water-quota/commit/719738d1af18d7f275fab230b44c9e20337ad996))
+* **model:** :bug: 首年当 spin-up 跑掉，分析侧统一丢弃（[#205](https://github.com/SongshGeoLab/yr-water-quota/issues/205)） ([75a9c37](https://github.com/SongshGeoLab/yr-water-quota/commit/75a9c378b47402c1b4f14f31c3141d9db13359b6))
+* P0 收尾——正文真源归位、意图列对齐、图的产出口（[#118](https://github.com/SongshGeoLab/yr-water-quota/issues/118) [#119](https://github.com/SongshGeoLab/yr-water-quota/issues/119) [#120](https://github.com/SongshGeoLab/yr-water-quota/issues/120) [#124](https://github.com/SongshGeoLab/yr-water-quota/issues/124) [#137](https://github.com/SongshGeoLab/yr-water-quota/issues/137) [#146](https://github.com/SongshGeoLab/yr-water-quota/issues/146) [#152](https://github.com/SongshGeoLab/yr-water-quota/issues/152) [#86](https://github.com/SongshGeoLab/yr-water-quota/issues/86) [#98](https://github.com/SongshGeoLab/yr-water-quota/issues/98)） ([6b90305](https://github.com/SongshGeoLab/yr-water-quota/commit/6b90305fdf26ef5c01c271b7128cfa990e5fb165))
+* 公开 API 垫片、死代码收尾，以及一个测试全绿却毁掉产物的回归（[#130](https://github.com/SongshGeoLab/yr-water-quota/issues/130) [#26](https://github.com/SongshGeoLab/yr-water-quota/issues/26)） ([a3b30dc](https://github.com/SongshGeoLab/yr-water-quota/commit/a3b30dc3a2d17920b252b2c082ee01aa1f85891c))
+* 配置单源化与工具链收尾（[#79](https://github.com/SongshGeoLab/yr-water-quota/issues/79) [#140](https://github.com/SongshGeoLab/yr-water-quota/issues/140) [#142](https://github.com/SongshGeoLab/yr-water-quota/issues/142) [#90](https://github.com/SongshGeoLab/yr-water-quota/issues/90)） ([4465c96](https://github.com/SongshGeoLab/yr-water-quota/commit/4465c961f9f6391795f0631d27c89b3e30ca692e))
+
+
+### Code Refactoring
+
+* **config:** :boom: 情景组单源化，仓库内那份副本删除（[#79](https://github.com/SongshGeoLab/yr-water-quota/issues/79)） ([0f60824](https://github.com/SongshGeoLab/yr-water-quota/commit/0f608241db25a5efa86eb4def0cfd13d040fb09e))
+* **cwatqim, analysis:** :recycle: 举报规则收成唯一定义，删掉分析层的第二份实现（[#129](https://github.com/SongshGeoLab/yr-water-quota/issues/129)） ([c619772](https://github.com/SongshGeoLab/yr-water-quota/commit/c619772d023f71ecace83f2a8b44c7f78ef4864f))
+* **cwatqim, analysis:** :recycle: 收掉 [#136](https://github.com/SongshGeoLab/yr-water-quota/issues/136) 剩下的四条重复与误导命名 ([e96df83](https://github.com/SongshGeoLab/yr-water-quota/commit/e96df83f2f90d61550d92beb91eefd98b3b398fd))
+* **cwatqim:** :recycle: 配水改成两角点闭式求解，删掉差分进化（[#94](https://github.com/SongshGeoLab/yr-water-quota/issues/94)） ([12eb2d9](https://github.com/SongshGeoLab/yr-water-quota/commit/12eb2d9fbb1bf181d55b93a15fef54c2ee00ec69))
+* **model:** 社会项换回乘性式(3)，参数正名 grid/group ([eb42bda](https://github.com/SongshGeoLab/yr-water-quota/commit/eb42bdaf1064c9efbf5c85251130889abf8a900c))
+
+
+### Documentation
+
+* **cwatqim:** :memo: `unit_payoff` 的 docstring 改成如实描述（[#133](https://github.com/SongshGeoLab/yr-water-quota/issues/133) 判定保留现状） ([025199f](https://github.com/SongshGeoLab/yr-water-quota/commit/025199fa96f940ec5595db9a8d28ec85e5251ccc))
+* **cwatqim:** :memo: 修掉 /code-review 抓出的四条：矛盾的注释、过期的 docstring、错的性质、瞎的指纹 ([3001bb2](https://github.com/SongshGeoLab/yr-water-quota/commit/3001bb22a413357f2ea8809cec1e370edf948ec7))
+* **odd:** :memo: ODD+D 按新的社会机制回写（[#94](https://github.com/SongshGeoLab/yr-water-quota/issues/94)、[#110](https://github.com/SongshGeoLab/yr-water-quota/issues/110)、[#72](https://github.com/SongshGeoLab/yr-water-quota/issues/72)、[#109](https://github.com/SongshGeoLab/yr-water-quota/issues/109)） ([428291a](https://github.com/SongshGeoLab/yr-water-quota/commit/428291a77925d1197a300f0fdd954b5264242aae))
+* 把 grid/group 的语义与新标定同步进面向读者的文档 ([7036907](https://github.com/SongshGeoLab/yr-water-quota/commit/70369070c1dcb3023af4be12a500920eb0084dd3))
+
 ## [0.2.0](https://github.com/SongshGeoLab/yr-water-quota/compare/v0.1.6...v0.2.0) (2026-08-18)
 
 
